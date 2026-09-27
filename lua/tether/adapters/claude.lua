@@ -410,7 +410,7 @@ function M.start(opts)
         reply({
           protocolVersion = version,
           capabilities = { tools = vim.empty_dict() },
-          serverInfo = { name = "tether.nvim", version = "0.1.0" },
+          serverInfo = { name = "tether.nvim", version = "0.2.0" },
         })
       end,
       ["tools/list"] = function(_, reply)

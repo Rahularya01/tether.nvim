@@ -5,19 +5,74 @@ local panes = require("tether.panes")
 
 local M = {}
 
--- Command names of agent CLIs. Node-based ones run as `node .../gemini`, so the
--- first two words of each process's command line are checked.
-M.agents = {
+-- Basename of an agent CLI, mapped to the label Herdr uses. The same names
+-- Herdr detects, plus aider, crush, and goose, which Herdr does not.
+-- Node-based ones run as `node .../gemini`, so the first two words of each
+-- process's command line are checked.
+local ALIASES = {
+  pi = "pi",
   claude = "claude",
+  ["claude-code"] = "claude",
   codex = "codex",
   gemini = "gemini",
+  cursor = "cursor",
+  ["cursor-agent"] = "cursor",
+  devin = "devin",
+  ["devin-cli"] = "devin",
+  agy = "agy",
+  antigravity = "agy",
+  ["antigravity-cli"] = "agy",
+  cline = "cline",
+  [".cline"] = "cline",
+  omp = "omp",
+  mastracode = "mastracode",
+  ["mastra-code"] = "mastracode",
   opencode = "opencode",
+  opencode2 = "opencode",
+  ["open-code"] = "opencode",
+  copilot = "copilot",
+  ["github-copilot"] = "copilot",
+  ghcs = "copilot",
+  kimi = "kimi",
+  ["kimi-code"] = "kimi",
+  kiro = "kiro",
+  ["kiro-cli"] = "kiro",
+  droid = "droid",
+  amp = "amp",
+  ["amp-local"] = "amp",
+  grok = "grok",
+  ["grok-build"] = "grok",
+  hermes = "hermes",
+  ["hermes-agent"] = "hermes",
+  kilo = "kilo",
+  ["kilo-code"] = "kilo",
+  qodercli = "qodercli",
+  qoderclicn = "qodercli",
+  qoder = "qodercli",
+  qodercn = "qodercli",
+  qwen = "qwen",
+  ["qwen-code"] = "qwen",
+  letta = "letta",
+  ["letta-code"] = "letta",
+  maki = "maki",
+  muse = "muse",
+  ["muse-code"] = "muse",
+  ["muse-cli"] = "muse",
   aider = "aider",
   crush = "crush",
-  amp = "amp",
-  ["cursor-agent"] = "cursor-agent",
   goose = "goose",
-  qwen = "qwen",
+}
+
+-- Install paths whose script name is generic (`cli.js`, `index.js`). The
+-- package directory is what identifies the agent.
+local PACKAGES = {
+  { "node_modules/@earendil-works/pi-coding-agent/", "pi" },
+  { "node_modules/@oh-my-pi/pi-coding-agent/", "omp" },
+  { "node_modules/@moonshot-ai/kimi-code/", "kimi" },
+  { "node_modules/@qwen-code/qwen-code/", "qwen" },
+  { "node_modules/mastracode/", "mastracode" },
+  { "node_modules/@letta-ai/letta-code/", "letta" },
+  { "/cursor-agent/versions/", "cursor" },
 }
 
 -- An agent in an editor's own terminal (Claude in Neovim's :terminal) is not
@@ -69,13 +124,59 @@ function M.parse_panes(stdout)
   return rows
 end
 
+local function basename_agent(token)
+  local base = vim.fs.basename(token):lower()
+  base = base:gsub("%.exe$", ""):gsub("%.cmd$", ""):gsub("%.bat$", ""):gsub("%.ps1$", "")
+  local name = ALIASES[base] or ALIASES[base:gsub("%.js$", "")]
+  if name then
+    return name
+  end
+  -- Muse's launcher execs `muse-bin-<version>`, never a bare `muse`.
+  local rest = base:match("^muse%-bin%-(.+)$")
+  if rest and rest:match("^%d") then
+    return "muse"
+  end
+end
+
+local function package_agent(token)
+  local path = token:lower():gsub("\\", "/")
+  for _, package in ipairs(PACKAGES) do
+    if path:find(package[1], 1, true) then
+      return package[2]
+    end
+  end
+end
+
+-- Cursor's CLI is often a symlink named `agent` whose target is `cursor-agent`.
+-- A process literally named `agent` is only counted when that resolution hits.
+local function cursor_alias(token)
+  if vim.fs.basename(token):lower() ~= "agent" then
+    return nil
+  end
+  local path = token
+  if not path:find("/", 1, true) then
+    path = vim.fn.exepath(token)
+  end
+  if not path or path == "" then
+    return nil
+  end
+  local resolved = vim.uv.fs_realpath(path) or path
+  if vim.fs.basename(resolved):lower() == "cursor-agent" or resolved:lower():find("cursor-agent", 1, true) then
+    return "cursor"
+  end
+end
+
+local function token_agent(token)
+  return basename_agent(token) or package_agent(token) or cursor_alias(token)
+end
+
 local function agent_name(command)
   if not command or command == "" then
     return nil
   end
   local words = vim.split(vim.trim(command), "%s+")
   for i = 1, math.min(2, #words) do
-    local name = M.agents[vim.fs.basename(words[i])]
+    local name = token_agent(words[i])
     if name then
       return name
     end

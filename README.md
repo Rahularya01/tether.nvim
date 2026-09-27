@@ -113,7 +113,7 @@ There is no shared protocol. Each agent discovers the editor its own way, and te
 | Codex | `$CODEX_HOME/ipc/ipc.sock` and `$TMPDIR/codex-ipc/ipc-<uid>.sock` | Unix socket: active file, selection, open tabs |
 | OpenCode | `server.json` in OpenCode's state directory | Client of the running server: appends to the prompt |
 | Herdr | `herdr agent list` | Agent panes; text typed with `herdr pane send-text` |
-| tmux | `tmux list-panes` and the processes under each pane | Agent panes; text typed with `tmux send-keys -l` |
+| tmux | `tmux list-panes` and the processes under each pane | The same agent CLIs Herdr detects, plus aider, crush, and goose; text typed with `tmux send-keys -l` |
 
 Listeners bind to `127.0.0.1`, and Claude Code and Gemini CLI must present the per-session token from the discovery file. Discovery files are written mode `0600`. If VS Code or another Neovim already serves the Codex socket, tether.nvim leaves it alone and takes it over once that editor exits.
 

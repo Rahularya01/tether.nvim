@@ -828,10 +828,26 @@ do
     "  200     1 -zsh",
     "  201   200 claude --resume",
     "  300     1 node /opt/homebrew/bin/gemini",
+    "  500     1 agy",
+    "  501     1 pi",
+    "  502     1 grok",
+    "  503     1 cursor-agent",
+    "  504     1 /usr/bin/ghcs",
+    "  505     1 node /opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+    "  506     1 muse-bin-0.1.0-R708.1",
+    "  507     1 /tmp/my-codex-helper",
   }, "\n"))
   check(under("200") == "claude", "tmux finds Claude under a pane's shell")
   check(under("300") == "gemini", "tmux finds a node-based agent by its script name")
   check(under("100") == nil, "tmux ignores Claude inside Neovim's own terminal")
+  check(under("500") == "agy", "tmux finds Antigravity CLI")
+  check(under("501") == "pi", "tmux finds Pi")
+  check(under("502") == "grok", "tmux finds Grok")
+  check(under("503") == "cursor", "tmux finds Cursor Agent CLI")
+  check(under("504") == "copilot", "tmux finds Copilot by its ghcs alias")
+  check(under("505") == "pi", "tmux finds Pi launched from its package path")
+  check(under("506") == "muse", "tmux finds a versioned Muse binary")
+  check(under("507") == nil, "tmux ignores a command that only contains an agent name")
   local found, here = tmux_adapter.find(rows, under, "%1")
   check(here and here.workspace == "$1" and here.tab == "@1", "tmux knows which session Neovim is in")
   local ranked = require("tether.panes").rank(found, "/p", here)

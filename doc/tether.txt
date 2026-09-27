@@ -141,10 +141,14 @@ Lists agents with `herdr agent list` and types into the chosen pane with
 `herdr pane send-text`. Neovim's workspace comes from $HERDR_WORKSPACE_ID.
 
 tmux ~
-Lists panes with `tmux list-panes -a` and counts a pane as an agent when an
-agent CLI (claude, codex, gemini, opencode, aider, and others) runs in it.
-Agents in an editor's own terminal are not counted. Types into the chosen
-pane with `tmux send-keys -l`. Neovim's session comes from $TMUX_PANE.
+Lists panes with `tmux list-panes -a` and counts a pane as an agent when a
+known agent CLI runs in it. The command names are the ones Herdr detects:
+pi, claude, codex, gemini, cursor (cursor-agent), devin, agy (Antigravity
+CLI), cline, omp, mastracode, opencode, copilot, kimi, kiro, droid, amp,
+grok, hermes, kilo, qodercli, qwen, letta, maki, and muse, plus aider,
+crush, and goose. Agents in an editor's own terminal are not counted.
+Types into the chosen pane with `tmux send-keys -l`. Neovim's session
+comes from $TMUX_PANE.
 
 Listeners bind to 127.0.0.1. Claude Code and Gemini CLI must present the
 per-session token from the discovery file. Discovery files are mode 0600.
