@@ -1,5 +1,7 @@
 # tether.nvim
 
+[![CI](https://github.com/Rahularya01/tether.nvim/actions/workflows/ci.yml/badge.svg)](https://github.com/Rahularya01/tether.nvim/actions/workflows/ci.yml)
+
 Neovim as the IDE for terminal coding agents: Claude Code, Gemini CLI, Codex, and OpenCode.
 
 In VS Code and JetBrains, these agents attach to the editor. They see the file you are in and what you selected, read your diagnostics, and show their edits as a diff you accept or reject. tether.nvim gives Neovim the same connection. The agent keeps its own terminal UI. Neovim is the editor it talks to.
