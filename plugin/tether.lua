@@ -52,6 +52,25 @@ vim.api.nvim_create_user_command("TetherReject", function()
   end
 end, { desc = "Reject the AI diff in the current review" })
 
+vim.api.nvim_create_user_command("TetherAcceptHunk", function()
+  local ok, err = require("tether").accept_hunk()
+  if not ok then
+    vim.notify(err or "no hunk to accept", vim.log.levels.WARN)
+  end
+end, { desc = "Accept the diff hunk under the cursor" })
+
+vim.api.nvim_create_user_command("TetherReviews", function()
+  require("tether").reviews()
+end, { desc = "Jump to an open AI review" })
+
+vim.api.nvim_create_user_command("TetherFocus", function()
+  require("tether").focus()
+end, { desc = "Focus the agent pane that last received text" })
+
+vim.api.nvim_create_user_command("TetherLog", function()
+  require("tether").show_log()
+end, { desc = "Show recent harness protocol events" })
+
 local function command_range(args)
   if args.range > 0 then
     return { args.line1, args.line2 }
@@ -69,6 +88,14 @@ end, { desc = "Add the current file to the AI prompt without sending it" })
 vim.api.nvim_create_user_command("TetherSendSelection", function(args)
   require("tether").send_selection(command_range(args))
 end, { range = true, desc = "Add the selected lines to the AI prompt without sending it" })
+
+vim.api.nvim_create_user_command("TetherSendDiagnostic", function()
+  require("tether").send_diagnostic()
+end, { desc = "Add the diagnostic under the cursor to the AI prompt without sending it" })
+
+vim.api.nvim_create_user_command("TetherSendNode", function()
+  require("tether").send_node()
+end, { desc = "Add the function or type under the cursor to the AI prompt without sending it" })
 
 -- The :Ai* names from before the rename to tether.nvim.
 for _, name in ipairs({ "Start", "Stop", "Status", "Env", "Accept", "Reject", "Send", "SendFile", "SendSelection" }) do

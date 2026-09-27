@@ -175,6 +175,7 @@ function M.serve(opts)
           token = headers["authorization"]:match("^[Bb]earer%s+(.+)$") or headers["authorization"]
         end
         if opts.auth_token and token ~= opts.auth_token then
+          require("tether.log").record(opts.name or "websocket", "rejected handshake")
           sock:write(httparse.response(401, "Unauthorized", { Connection = "close" }, ""))
           close()
           return

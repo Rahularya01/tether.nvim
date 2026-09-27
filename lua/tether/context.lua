@@ -259,6 +259,18 @@ function M.snapshot()
   }
 end
 
+-- diagnostic.col is a byte index. Agents expect a UTF-16 column, same as selections.
+local function utf16_col(bufnr, lnum, byte_col)
+  local line = vim.api.nvim_buf_get_lines(bufnr, lnum, lnum + 1, false)[1] or ""
+  if byte_col < 0 then
+    byte_col = 0
+  end
+  if byte_col > #line then
+    byte_col = #line
+  end
+  return util.utf16_len(line:sub(1, byte_col))
+end
+
 function M.diagnostics(path)
   path = path and util.abspath(path) or nil
   local grouped = {}
@@ -276,8 +288,8 @@ function M.diagnostics(path)
             source = diagnostic.source or "neovim",
             code = diagnostic.code,
             range = {
-              start = { line = diagnostic.lnum, character = diagnostic.col },
-              ["end"] = { line = finish_line, character = finish_col },
+              start = { line = diagnostic.lnum, character = utf16_col(bufnr, diagnostic.lnum, diagnostic.col) },
+              ["end"] = { line = finish_line, character = utf16_col(bufnr, finish_line, finish_col) },
             },
           }
         end
@@ -293,11 +305,12 @@ function M.diagnostics(path)
   return grouped
 end
 
-local function descriptor(path, root)
+local function descriptor(path, root, dirty)
   return {
     label = util.basename(path),
     path = root and util.relative(path, root) or path,
     fsPath = path,
+    isDirty = dirty and true or false,
   }
 end
 
@@ -315,16 +328,29 @@ end
 function M.codex(root)
   root = root and util.abspath(root) or nil
   local snap = M.snapshot()
-  local tabs = {}
+  local editors = {}
   local seen = {}
   for _, editor in ipairs(snap.editors) do
     if (not root or util.under(editor.path, root)) and not seen[editor.path] then
       seen[editor.path] = true
-      tabs[#tabs + 1] = descriptor(editor.path, root)
-      if #tabs == 20 then
-        break
-      end
+      editors[#editors + 1] = editor
     end
+  end
+  -- Most recently focused first, so the 20-tab cap keeps the files in use.
+  table.sort(editors, function(a, b)
+    local a_focus = snap.focus_at[a.path]
+    local b_focus = snap.focus_at[b.path]
+    local a_seq = a_focus and a_focus.seq or 0
+    local b_seq = b_focus and b_focus.seq or 0
+    if a_seq ~= b_seq then
+      return a_seq > b_seq
+    end
+    return a.path < b.path
+  end)
+  local tabs = {}
+  for i = 1, math.min(20, #editors) do
+    local editor = editors[i]
+    tabs[#tabs + 1] = descriptor(editor.path, root, editor.dirty)
   end
 
   local ide = { openTabs = tabs }
@@ -332,7 +358,7 @@ function M.codex(root)
   local selection = snap.selection
   if active and (not root or util.under(active.path, root)) and selection then
     local range, selections, text = codex_selection(selection)
-    local file = descriptor(active.path, root)
+    local file = descriptor(active.path, root, active.dirty)
     file.selection = range
     file.activeSelectionContent = text
     file.selections = selections
@@ -352,6 +378,7 @@ function M.gemini(snap, opts)
     local item = {
       path = editor.path,
       timestamp = focus.ms,
+      isDirty = editor.dirty and true or false,
     }
     order[item] = focus.seq
     if editor.active then
@@ -383,6 +410,67 @@ function M.gemini(snap, opts)
     state.isTrusted = opts.trusted and true or false
   end
   return { workspaceState = state }
+end
+
+-- The diagnostic on the cursor line, preferring one whose range contains the cursor.
+function M.cursor_diagnostic()
+  local cursor = vim.api.nvim_win_get_cursor(0)
+  local line = cursor[1] - 1
+  local col = cursor[2]
+  local items = vim.diagnostic.get(0, { lnum = line })
+  if #items == 0 then
+    return nil
+  end
+  for _, item in ipairs(items) do
+    local start_col = item.col or 0
+    local end_line = item.end_lnum or item.lnum
+    local end_col = item.end_col or (start_col + 1)
+    local after_start = line > item.lnum or col >= start_col
+    local before_end = line < end_line or col < end_col
+    if after_start and before_end then
+      return item
+    end
+  end
+  return items[1]
+end
+
+local function interesting_node(type_name)
+  return type_name:find("function", 1, true)
+    or type_name:find("method", 1, true)
+    or type_name:find("class", 1, true)
+    or type_name:find("struct", 1, true)
+    or type_name:find("enum", 1, true)
+    or type_name:find("interface", 1, true)
+    or type_name:find("impl_item", 1, true)
+    or type_name:find("namespace", 1, true)
+    or type_name:find("module", 1, true)
+end
+
+-- Innermost function, method, class, or similar node around the cursor.
+-- Returns the node, or nil and a reason.
+function M.enclosing_node()
+  local bufnr = vim.api.nvim_get_current_buf()
+  local ok, parser = pcall(vim.treesitter.get_parser, bufnr)
+  if not ok or not parser then
+    return nil, "no syntax tree for this buffer"
+  end
+  if not pcall(function()
+    parser:parse()
+  end) then
+    return nil, "no syntax tree for this buffer"
+  end
+  local node = vim.treesitter.get_node({ bufnr = bufnr })
+  if not node then
+    return nil, "no syntax tree for this buffer"
+  end
+  local current = node
+  while current do
+    if interesting_node(current:type()) then
+      return current
+    end
+    current = current:parent()
+  end
+  return nil, "cursor is not inside a function or type"
 end
 
 function M._reset()

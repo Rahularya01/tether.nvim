@@ -55,6 +55,9 @@ Run the agent from a terminal in the project. `:terminal` inside Neovim is the s
 | `<leader>af` | `:TetherSendFile` | the current file |
 | `<leader>ao` (visual) | `:'<,'>TetherSendSelection` | the selected lines |
 | `<leader>ao` (normal) | `:TetherSendSelection` | the last visual selection |
+| `<leader>ad` | `:TetherSendDiagnostic` | the diagnostic under the cursor, with its message |
+| `<leader>an` | `:TetherSendNode` | the function or type around the cursor |
+| `<leader>aj` | `:TetherFocus` | jumps to the pane that last received text |
 | | `:TetherSend` | the lines in a range, or the file without one |
 
 Where the text goes:
@@ -63,19 +66,26 @@ Where the text goes:
 2. **Claude Code over its IDE connection**, as an at-mention.
 3. **OpenCode**, appended to its prompt.
 
-A notification says where the text went. A path with spaces is sent as `@"my file.lua#L3"`, which Claude Code reads as one path.
+A notification says where the text went. A path with spaces is sent as `@"my file.lua#L3"`, which Claude Code reads as one path. A buffer that is not a file on disk sends its text instead of a path. Claude Code's at-mention needs a path, so that text goes to a pane agent or to OpenCode.
 
 ### Reviewing edits
 
 When Claude Code or Gemini CLI proposes an edit, a tab opens with the current file next to the proposal. You can edit the proposal before accepting.
 
-- `:TetherAccept` writes it. If the file has unsaved changes, it refuses rather than overwrite them.
-- `:TetherReject` discards it. Closing the tab does the same.
+- `ga` or `:TetherAccept` writes it. If the file has unsaved changes, it refuses rather than overwrite them. The text reported back to the agent is whatever is on disk after the write, including format-on-save.
+- `gh` or `:TetherAcceptHunk` writes only the change under the cursor and leaves the rest of the review open. The last hunk finishes the review.
+- `gr` or `:TetherReject` discards it. Closing the tab does the same. Hunks already written stay on disk.
+- `ga`, `gh`, and `gr` are buffer-local on the proposal. `:TetherStatus` lists a review that is still open, and `:TetherReviews` jumps to one.
+- A second proposal for a file that already has a review waits, and opens when the current one finishes.
 - Answering in Claude's terminal closes the tab for you.
 
 ### Other commands
 
 - `:TetherStatus` shows each adapter: ports, sockets, connected clients, and agents found.
+- `:TetherLog` shows recent handshakes, tool calls, and review events.
+- `:TetherFocus` jumps to the last Herdr or tmux agent pane. Set `focus = true` to do that after every send.
+- The last pane agent is remembered across Neovim restarts.
+- `User TetherClient` fires with `{ adapter, clients }` when a harness connects or drops. `User TetherReview` fires with `{ action, path }` when a review opens, a hunk is accepted, or the review is accepted or rejected.
 - `:TetherEnv` prints export lines for a terminal opened before the plugin started.
 - `:TetherStart` and `:TetherStop` start and stop everything.
 - `:checkhealth tether`
@@ -90,13 +100,22 @@ require("tether").setup({
   -- "always" asks which pane agent gets the text, even when there is only one.
   -- "auto" asks only when there are several.
   pick = "always",
+  -- When true, a send also focuses that pane.
+  focus = false,
   -- Set one to false to skip it, or keymaps = false for none.
   keymaps = {
     send_file = "<leader>af",
     send_selection = "<leader>ao",
+    send_diagnostic = "<leader>ad",
+    send_node = "<leader>an",
+    focus = "<leader>aj",
   },
+  -- Buffer-local maps on the proposal. Set one to false to skip it, or false for none.
+  review_keymaps = { accept = "ga", reject = "gr", hunk = "gh" },
   -- Gemini CLI decides workspace trust itself. Set true or false to override it.
   gemini = { trusted = nil },
+  -- Extra tmux process names to treat as agents. A list, or { basename = "label" }.
+  tmux = { agents = {} },
 })
 ```
 
@@ -113,7 +132,7 @@ There is no shared protocol. Each agent discovers the editor its own way, and te
 | Codex | `$CODEX_HOME/ipc/ipc.sock` and `$TMPDIR/codex-ipc/ipc-<uid>.sock` | Unix socket: active file, selection, open tabs |
 | OpenCode | `server.json` in OpenCode's state directory | Client of the running server: appends to the prompt |
 | Herdr | `herdr agent list` | Agent panes; text typed with `herdr pane send-text` |
-| tmux | `tmux list-panes` and the processes under each pane | The same agent CLIs Herdr detects, plus aider, crush, and goose; text typed with `tmux send-keys -l` |
+| tmux | `tmux list-panes` and the processes under each pane | The same agent CLIs Herdr detects, plus aider, crush, and goose, plus any names in `tmux.agents`; text typed with `tmux send-keys -l` |
 
 Listeners bind to `127.0.0.1`, and Claude Code and Gemini CLI must present the per-session token from the discovery file. Discovery files are written mode `0600`. If VS Code or another Neovim already serves the Codex socket, tether.nvim leaves it alone and takes it over once that editor exits.
 

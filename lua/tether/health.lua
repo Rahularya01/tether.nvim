@@ -27,6 +27,20 @@ local function report(kind, msg)
   end
 end
 
+local function discovery_dirs(tether)
+  local state = tether.is_running() and tether.state() or {}
+  local claude = state.claude and state.claude.dir
+  if not claude then
+    local home = os.getenv("CLAUDE_CONFIG_DIR") or ((os.getenv("HOME") or "") .. "/.claude")
+    claude = home .. "/ide"
+  end
+  local gemini = state.gemini and state.gemini.dir
+  if not gemini then
+    gemini = (vim.uv.os_tmpdir() or "/tmp") .. "/gemini/ide"
+  end
+  return claude, gemini
+end
+
 local M = {}
 
 function M.check()
@@ -42,17 +56,46 @@ function M.check()
   end
   if not tether.is_running() then
     report("warn", "not running. :TetherStart or require('tether').setup()")
-    return
-  end
-  report("ok", "running")
-  for _, line in ipairs(tether.status()) do
-    report("ok", line)
-  end
-  local script = tether.env_script()
-  if script ~= "" then
-    report("ok", "terminal environment is set for new Neovim terminals")
   else
-    report("warn", "no harness environment variables are set")
+    report("ok", "running")
+    for _, line in ipairs(tether.status()) do
+      report("ok", line)
+    end
+    local script = tether.env_script()
+    if script ~= "" then
+      report("ok", "terminal environment is set for new Neovim terminals")
+    else
+      report("warn", "no harness environment variables are set")
+    end
+  end
+
+  local waiting = require("tether.diff").waiting()
+  if #waiting == 0 then
+    report("ok", "no review waiting")
+  else
+    local parts = {}
+    for _, item in ipairs(waiting) do
+      local note = item.path
+      if item.queued > 0 then
+        note = string.format("%s (+%d waiting)", item.path, item.queued)
+      end
+      parts[#parts + 1] = note
+    end
+    report("warn", "review waiting: " .. table.concat(parts, ", "))
+  end
+
+  local claude_dir, gemini_dir = discovery_dirs(tether)
+  local claude_stale = require("tether.adapters.claude").stale(claude_dir)
+  if #claude_stale == 0 then
+    report("ok", "no stale Claude lock files")
+  else
+    report("warn", #claude_stale .. " stale Claude lock file(s) in " .. claude_dir)
+  end
+  local gemini_stale = require("tether.adapters.gemini").stale(gemini_dir)
+  if #gemini_stale == 0 then
+    report("ok", "no stale Gemini discovery files")
+  else
+    report("warn", #gemini_stale .. " stale Gemini discovery file(s) in " .. gemini_dir)
   end
 end
 

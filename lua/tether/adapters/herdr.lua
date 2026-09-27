@@ -91,6 +91,24 @@ function M.start(opts)
   handle.targets = list
 
   -- Types text into a pane's input without pressing Enter. The user submits it.
+  function handle.focus(pane_id, done)
+    if not bin then
+      if done then
+        done(false, handle.detail)
+      end
+      return
+    end
+    vim.system({ bin, "agent", "focus", pane_id }, { text = true }, function(out)
+      vim.schedule(function()
+        local focused = out and out.code == 0
+        local message = ((out and out.stdout) or "") .. ((out and out.stderr) or "")
+        if done then
+          done(focused, message)
+        end
+      end)
+    end)
+  end
+
   function handle.insert(pane_id, text, done)
     if not bin then
       if done then

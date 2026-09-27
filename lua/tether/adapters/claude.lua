@@ -1,5 +1,6 @@
 local context = require("tether.context")
 local diff = require("tether.diff")
+local log = require("tether.log")
 local mcp = require("tether.mcp")
 local util = require("tether.util")
 local ws = require("tether.ws")
@@ -331,10 +332,12 @@ local function selection_changed(snap)
   }
 end
 
-local function sweep(dir)
+-- Lock files left by a Neovim that exited without deleting them.
+function M.stale(dir)
+  local stale = {}
   local scanner = vim.uv.fs_scandir(dir)
   if not scanner then
-    return
+    return stale
   end
   while true do
     local name = vim.uv.fs_scandir_next(scanner)
@@ -349,10 +352,17 @@ local function sweep(dir)
         fd:close()
         local ok, data = pcall(vim.json.decode, raw or "")
         if ok and type(data) == "table" and data.ideName == "Neovim" and not util.pid_alive(data.pid) then
-          vim.uv.fs_unlink(path)
+          stale[#stale + 1] = path
         end
       end
     end
+  end
+  return stale
+end
+
+local function sweep(dir)
+  for _, path in ipairs(M.stale(dir)) do
+    vim.uv.fs_unlink(path)
   end
 end
 
@@ -410,13 +420,14 @@ function M.start(opts)
         reply({
           protocolVersion = version,
           capabilities = { tools = vim.empty_dict() },
-          serverInfo = { name = "tether.nvim", version = "0.2.0" },
+          serverInfo = { name = "tether.nvim", version = "0.3.0" },
         })
       end,
       ["tools/list"] = function(_, reply)
         reply({ tools = TOOLS })
       end,
       ["tools/call"] = function(params, reply)
+        log.record("claude", "tools/call " .. tostring(params.name))
         call_tool(params.name, params.arguments, reply, push)
       end,
       ping = function(_, reply)
@@ -439,6 +450,7 @@ function M.start(opts)
   server, handle.err = ws.serve({
     host = "127.0.0.1",
     port = 0,
+    name = "claude",
     auth_token = token,
     on_message = function(client, text, done)
       -- Replies are matched by id, so the next message does not wait for this one.

@@ -190,4 +190,202 @@ function M.serve(opts)
   }
 end
 
+local function parse_url(url)
+  local scheme, rest = tostring(url or ""):match("^(https?)://(.+)$")
+  if not scheme or scheme ~= "http" then
+    return nil, "only http URLs are supported"
+  end
+  local hostport, path = rest:match("^([^/]+)(.*)$")
+  if not hostport or hostport == "" then
+    return nil, "bad URL"
+  end
+  if path == nil or path == "" then
+    path = "/"
+  end
+  local host, port = hostport:match("^([^:]+):(%d+)$")
+  if not host then
+    host = hostport
+    port = "80"
+  end
+  return { host = host, port = tonumber(port), path = path }
+end
+
+local function response_headers(head)
+  local headers = {}
+  local status
+  local first = true
+  for line in head:gmatch("[^\r\n]+") do
+    if first then
+      status = tonumber(line:match("^HTTP/%d+%.%d+%s+(%d+)"))
+      first = false
+    else
+      local key, value = line:match("^([^:%s]+)%s*:%s*(.*)$")
+      if key then
+        headers[key:lower()] = value
+      end
+    end
+  end
+  return status, headers
+end
+
+local function unchunk(body, eof)
+  local out, i = {}, 1
+  while true do
+    local line_end = body:find("\r\n", i, true)
+    if not line_end then
+      if eof then
+        return nil, "truncated chunk"
+      end
+      return nil
+    end
+    local size = tonumber(body:sub(i, line_end - 1):match("^(%x+)"), 16)
+    if not size then
+      return nil, "bad chunk size"
+    end
+    if size == 0 then
+      return table.concat(out)
+    end
+    local start_at = line_end + 2
+    local stop = start_at + size - 1
+    if #body < stop + 2 then
+      if eof then
+        return nil, "truncated chunk"
+      end
+      return nil
+    end
+    if body:sub(stop + 1, stop + 2) ~= "\r\n" then
+      return nil, "bad chunk ending"
+    end
+    out[#out + 1] = body:sub(start_at, stop)
+    i = stop + 3
+  end
+end
+
+-- nil, nil while the response is incomplete. nil, err when it cannot be parsed.
+local function parse_response(buf, eof)
+  local header_end = buf:find("\r\n\r\n", 1, true)
+  if not header_end then
+    if eof or #buf > 65536 then
+      return nil, "bad response"
+    end
+    return nil
+  end
+  local status, headers = response_headers(buf:sub(1, header_end - 1))
+  if not status then
+    return nil, "bad response"
+  end
+  local rest = buf:sub(header_end + 4)
+  local encoding = headers["transfer-encoding"]
+  if encoding and encoding:lower():find("chunked", 1, true) then
+    local body, err = unchunk(rest, eof)
+    if not body then
+      return nil, err
+    end
+    return { status = status, body = body }
+  end
+  local length = tonumber(headers["content-length"] or "")
+  if length then
+    if #rest < length then
+      if eof then
+        return nil, "truncated body"
+      end
+      return nil
+    end
+    return { status = status, body = rest:sub(1, length) }
+  end
+  if eof then
+    return { status = status, body = rest }
+  end
+  return nil
+end
+
+-- opts: url, method, headers, body, timeout (ms). callback({ status, body, err }) on the main loop.
+function M.request(opts, callback)
+  opts = opts or {}
+  local target, url_err = parse_url(opts.url)
+  if not target then
+    vim.schedule(function()
+      callback({ err = url_err })
+    end)
+    return
+  end
+  local sock = vim.uv.new_tcp()
+  local timer = vim.uv.new_timer()
+  local acc = ""
+  local settled = false
+  local function finish(result)
+    if settled then
+      return
+    end
+    settled = true
+    if timer and not timer:is_closing() then
+      timer:stop()
+      timer:close()
+    end
+    if sock and not sock:is_closing() then
+      pcall(function()
+        sock:read_stop()
+        sock:close()
+      end)
+    end
+    vim.schedule(function()
+      callback(result)
+    end)
+  end
+  local function consider(eof)
+    if #acc > 8 * 1024 * 1024 then
+      finish({ err = "response too large" })
+      return
+    end
+    local parsed, err = parse_response(acc, eof)
+    if parsed then
+      finish(parsed)
+    elseif err then
+      finish({ err = err })
+    elseif eof then
+      finish({ err = "incomplete response" })
+    end
+  end
+  timer:start(opts.timeout or 2000, 0, function()
+    finish({ err = "timed out" })
+  end)
+  sock:connect(target.host, target.port, function(err)
+    if err then
+      finish({ err = tostring(err) })
+      return
+    end
+    local body = opts.body or ""
+    local header_lines = {
+      string.format("%s %s HTTP/1.1", opts.method or "GET", target.path),
+      "Host: " .. target.host .. ":" .. target.port,
+      "Accept: application/json",
+      "Connection: close",
+    }
+    for key, value in pairs(opts.headers or {}) do
+      header_lines[#header_lines + 1] = key .. ": " .. value
+    end
+    if body ~= "" then
+      header_lines[#header_lines + 1] = "Content-Length: " .. tostring(#body)
+    end
+    local req = table.concat(header_lines, "\r\n") .. "\r\n\r\n" .. body
+    sock:write(req, function(write_err)
+      if write_err then
+        finish({ err = tostring(write_err) })
+      end
+    end)
+    sock:read_start(function(read_err, data)
+      if read_err then
+        finish({ err = tostring(read_err) })
+        return
+      end
+      if data then
+        acc = acc .. data
+        consider(false)
+        return
+      end
+      consider(true)
+    end)
+  end)
+end
+
 return M

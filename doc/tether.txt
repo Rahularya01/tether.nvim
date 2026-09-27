@@ -45,31 +45,51 @@ Calling setup() is optional. The plugin starts on |VimEnter| unless
   require("tether").setup({
     adapters = { "claude", "gemini", "codex", "opencode", "herdr", "tmux" },
     pick = "always",
-    keymaps = { send_file = "<leader>af", send_selection = "<leader>ao" },
+    focus = false,
+    keymaps = {
+      send_file = "<leader>af",
+      send_selection = "<leader>ao",
+      send_diagnostic = "<leader>ad",
+      send_node = "<leader>an",
+      focus = "<leader>aj",
+    },
+    review_keymaps = { accept = "ga", reject = "gr", hunk = "gh" },
     gemini = { trusted = nil },
+    tmux = { agents = {} },
   })
 <
 adapters        Which adapters to start. All six by default.
 pick            "always" (default) asks which pane agent gets the text, even
                 when there is only one. "auto" asks only when there are
                 several.
+focus           When true, a send also focuses that Herdr or tmux pane.
 keymaps         Set one to false to skip it, or keymaps = false for none.
+review_keymaps  Buffer-local maps on a proposal. Set one to false to skip
+                it, or review_keymaps = false for none.
 gemini.trusted  nil leaves workspace trust to Gemini CLI. true or false
                 overrides it.
+tmux.agents     Extra process basenames to treat as agents. A list, or a
+                map of { basename = "label" }.
 
 ==============================================================================
 3. Commands                                                  *tether-commands*
 
 :TetherStart            Start the adapters
 :TetherStop             Stop them and remove discovery files
-:TetherStatus           Show ports, sockets, clients, and agents found
+:TetherStatus           Show ports, sockets, clients, agents, and open reviews
 :TetherEnv              Print export lines for a terminal opened earlier
 :TetherAccept           Write the proposed edit. See |tether-review|
+:TetherAcceptHunk       Write the hunk under the cursor
 :TetherReject           Discard the proposed edit
+:TetherReviews          Jump to an open review
+:TetherFocus            Focus the pane that last received text
+:TetherLog              Show recent protocol events
 :TetherSendFile         Add the current file to an agent's prompt
 :[range]TetherSendSelection
                         Add the lines in [range], or the selection
 :[range]TetherSend      With a range, the lines. Without one, the file
+:TetherSendDiagnostic   Add the diagnostic under the cursor
+:TetherSendNode         Add the function or type around the cursor
 
 The commands from before the rename (:AiSend and the rest) still work.
 
@@ -77,6 +97,12 @@ The commands from before the rename (:AiSend and the rest) still work.
 <leader>af      (normal) :TetherSendFile
 <leader>ao      (normal, visual) :TetherSendSelection. From normal mode it
                 uses the last visual selection.
+<leader>ad      (normal) :TetherSendDiagnostic
+<leader>an      (normal) :TetherSendNode
+<leader>aj      (normal) :TetherFocus
+ga              (proposal buffer) :TetherAccept
+gh              (proposal buffer) :TetherAcceptHunk
+gr              (proposal buffer) :TetherReject
 
 ==============================================================================
 4. Sending to an agent                                           *tether-send*
@@ -97,7 +123,9 @@ The text goes to the first of these that is available:
 3. OpenCode, appended to its prompt.
 
 Claude gets @path#L10-24. Other agents get path:10-24. A path with spaces is
-quoted: @"my file.lua#L3".
+quoted: @"my file.lua#L3". A buffer with no path on disk sends its text.
+Claude Code's at-mention needs a path, so that text goes to a pane agent or
+to OpenCode.
 
 ==============================================================================
 5. Reviews                                                     *tether-review*
@@ -105,10 +133,19 @@ quoted: @"my file.lua#L3".
 When Claude Code or Gemini CLI proposes an edit, a tab opens with the file
 next to the proposal. The proposal can be edited before accepting.
 
-:TetherAccept writes it. It refuses if the file has unsaved changes, because
-accepting would overwrite them. Write or undo them first.
-:TetherReject discards it, and so does closing the tab. When you answer in
-Claude's terminal instead, Claude closes the tab.
+ga or :TetherAccept writes it. It refuses if the file has unsaved changes,
+because accepting would overwrite them. Write or undo them first. The text
+reported to the agent is the buffer after the write, so format-on-save is
+included. gh or :TetherAcceptHunk writes only the hunk under the cursor and
+leaves the review open until the last difference is accepted. gr or
+:TetherReject discards what is left, and so does closing the tab. Hunks
+already written stay on disk. ga, gh, and gr are buffer-local on the
+proposal. :TetherStatus lists a review that is still open, and
+:TetherReviews jumps to one.
+
+A second proposal for a file that already has a review waits, and opens
+when the current one finishes. When you answer in Claude's terminal
+instead, Claude closes the tab.
 
 ==============================================================================
 6. Adapters                                                  *tether-adapters*
@@ -146,7 +183,8 @@ known agent CLI runs in it. The command names are the ones Herdr detects:
 pi, claude, codex, gemini, cursor (cursor-agent), devin, agy (Antigravity
 CLI), cline, omp, mastracode, opencode, copilot, kimi, kiro, droid, amp,
 grok, hermes, kilo, qodercli, qwen, letta, maki, and muse, plus aider,
-crush, and goose. Agents in an editor's own terminal are not counted.
+crush, and goose, plus any names in |tether-setup|'s tmux.agents. Agents
+in an editor's own terminal are not counted.
 Types into the chosen pane with `tmux send-keys -l`. Neovim's session
 comes from $TMUX_PANE.
 
@@ -158,4 +196,31 @@ per-session token from the discovery file. Discovery files are mode 0600.
 >
   :checkhealth tether
 <
+Reports whether tether.nvim is running, lists an open review, and warns
+about Claude lock files and Gemini discovery files left by a Neovim that
+exited without deleting them.
+
+The last Herdr or tmux pane you sent text to is stored in
+stdpath("state")/tether-last.json and offered first next time.
+
+*TetherClient* and *TetherReview* are |User| autocommands.
+>
+  vim.api.nvim_create_autocmd("User", {
+    pattern = "TetherClient",
+    callback = function(args)
+      -- args.data = { adapter = "claude", clients = 1 }
+    end,
+  })
+  vim.api.nvim_create_autocmd("User", {
+    pattern = "TetherReview",
+    callback = function(args)
+      -- args.data = { action = "open", path = "/path/to/file" }
+      -- action is "open", "hunk", "accept", or "reject"
+    end,
+  })
+<
+Gemini CLI's context update has no diagnostics field, and Codex's socket
+only answers ide-context. Send a diagnostic with |:TetherSendDiagnostic|.
+An unrecognized Codex method is recorded in |:TetherLog|.
+
  vim:tw=78:ts=8:ft=help:norl:

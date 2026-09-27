@@ -37,6 +37,7 @@ fd:write("print('hello')\n")
 fd:close()
 
 local tether = require("tether")
+tether._state_file = root .. "/last.json"
 local setup_errors = tether.setup({
   adapters = { "claude", "gemini", "codex" },
   claude = { dir = root .. "/claude" },
@@ -221,6 +222,18 @@ local opened = wait_until(3000, function()
   return require("tether.diff").current(sample) ~= nil
 end)
 check(opened, "claude openDiff opens a review")
+local review = require("tether.diff").current(sample)
+local function review_map(lhs)
+  for _, map in ipairs(vim.api.nvim_buf_get_keymap(review.proposed, "n")) do
+    if map.lhs == lhs then
+      return true
+    end
+  end
+end
+check(review_map("ga"), "review buffer maps ga to accept")
+check(review_map("gh"), "review buffer maps gh to accept a hunk")
+check(review_map("gr"), "review buffer maps gr to reject")
+check(table.concat(tether.status(), "\n"):find("reviews:", 1, true) ~= nil, "status lists the open review")
 require("tether.diff").accept()
 local saved = wait_msg(function(msg)
   return msg.id == 4 and msg.result and msg.result.content and msg.result.content[1].text == "FILE_SAVED"
@@ -307,16 +320,145 @@ check(reply_text(16, "claude openDiff answered after accept") == "FILE_SAVED", "
 check(read_sample() == "print('noeol')", "accepted proposal is written byte for byte")
 check(vim.bo[sample_buf].fixendofline == true, "accept restores fixendofline")
 
+-- A second proposal for the same file waits behind the one already open.
+check(open_review(40, "print('first')\n", "review-first"), "queued review: the first one opens")
+call(41, "openDiff", { new_file_path = sample, new_file_contents = "print('second')\n", tab_name = "review-second" })
+check(
+  wait_until(1000, function()
+    local waiting = require("tether.diff").waiting()
+    return waiting[1] and waiting[1].queued == 1
+  end),
+  "a second review of the same file waits"
+)
+local first_review = require("tether.diff").current(sample)
+local first_text = table.concat(vim.api.nvim_buf_get_lines(first_review.proposed, 0, -1, false), "\n")
+check(first_text == "print('first')", "the open review stays the first proposal")
+check(require("tether.diff").accept(), "queued review: accepting the first one")
+check(
+  reply_text(40, "claude openDiff answered for the first queued review") == "FILE_SAVED",
+  "the first review is saved"
+)
+check(
+  wait_until(3000, function()
+    local current = require("tether.diff").current(sample)
+    if not current then
+      return false
+    end
+    return table.concat(vim.api.nvim_buf_get_lines(current.proposed, 0, -1, false), "\n") == "print('second')"
+  end),
+  "the waiting review opens after the first is accepted"
+)
+check(require("tether.diff").reject(), "queued review: rejecting the second one")
+check(
+  reply_text(41, "claude openDiff answered for the waiting review") == "DIFF_REJECTED",
+  "the waiting review is rejected"
+)
+
+-- Format-on-save during :write is what the agent is told was accepted.
+do
+  local formatted = root .. "/fmt.lua"
+  vim.fn.writefile({ "old\n" }, formatted)
+  local reported
+  local aug = vim.api.nvim_create_autocmd("BufWritePre", {
+    once = true,
+    callback = function(ev)
+      if vim.api.nvim_buf_get_name(ev.buf):find("fmt.lua", 1, true) then
+        vim.api.nvim_buf_set_lines(ev.buf, -1, -1, false, { "-- formatted" })
+      end
+    end,
+  })
+  check(
+    require("tether.diff").open(formatted, "new\n", function(_, content)
+      reported = content
+    end),
+    "format review opens"
+  )
+  check(require("tether.diff").accept(formatted), "format review accepts")
+  check(reported and reported:find("-- formatted", 1, true) ~= nil, "accept reports the text after autocmds")
+  local formatted_file = io.open(formatted, "r")
+  local disk = formatted_file and formatted_file:read("*a") or ""
+  if formatted_file then
+    formatted_file:close()
+  end
+  check(disk:find("-- formatted", 1, true) ~= nil, "accepted file on disk includes the autocmd edit")
+  pcall(vim.api.nvim_del_autocmd, aug)
+end
+
+do
+  local path = root .. "/hunks.lua"
+  vim.fn.writefile({ "alpha", "keep", "omega" }, path)
+  local actions = {}
+  local aug = vim.api.nvim_create_autocmd("User", {
+    pattern = "TetherReview",
+    callback = function(args)
+      actions[#actions + 1] = args.data and args.data.action
+    end,
+  })
+  local finished
+  check(
+    require("tether.diff").open(path, "ALPHA\nkeep\nOMEGA\n", function(ok)
+      finished = ok
+    end),
+    "hunk review opens"
+  )
+  check(actions[#actions] == "open", "opening a review emits TetherReview")
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })
+  check(require("tether.diff").accept_hunk(path), "accepts the hunk under the cursor")
+  local mid_file = io.open(path, "r")
+  local mid = mid_file and mid_file:read("*a") or ""
+  if mid_file then
+    mid_file:close()
+  end
+  check(
+    mid:find("ALPHA", 1, true) and mid:find("omega", 1, true) and not mid:find("OMEGA", 1, true),
+    "only the first hunk is written"
+  )
+  check(require("tether.diff").current(path) ~= nil, "the review stays open after one hunk")
+  check(tether.reviews(), "TetherReviews jumps to the open review")
+  vim.api.nvim_win_set_cursor(0, { 3, 0 })
+  check(require("tether.diff").accept_hunk(path), "accepts the remaining hunk")
+  check(finished == true, "the last hunk finishes the review")
+  check(actions[#actions] == "accept", "finishing a review emits accept")
+  pcall(vim.api.nvim_del_autocmd, aug)
+end
+
+require("tether.log").record("test", "protocol-marker")
+local log_buf = tether.show_log()
+check(
+  table.concat(vim.api.nvim_buf_get_lines(log_buf, 0, -1, false), "\n"):find("protocol-marker", 1, true) ~= nil,
+  "TetherLog shows protocol events"
+)
+vim.cmd("bwipeout")
+
 local ns = vim.api.nvim_create_namespace("tether-test")
 vim.diagnostic.set(ns, sample_buf, { { lnum = 0, col = 0, message = "boom", severity = vim.diagnostic.severity.WARN } })
 call(17, "getDiagnostics", { uri = vim.uri_from_fname(sample) })
 check((reply_text(17, "claude getDiagnostics reply") or ""):find("boom", 1, true), "claude getDiagnostics")
 vim.diagnostic.reset(ns, sample_buf)
 
+do
+  local utf = root .. "/utf.lua"
+  vim.fn.writefile({ "é hello" }, utf)
+  vim.cmd("edit " .. vim.fn.fnameescape(utf))
+  local utf_buf = vim.api.nvim_get_current_buf()
+  local utf_ns = vim.api.nvim_create_namespace("tether-utf")
+  -- The space is byte 2. é is one UTF-16 unit, so the space is column 1.
+  vim.diagnostic.set(utf_ns, utf_buf, { { lnum = 0, col = 2, end_col = 3, message = "space" } })
+  local grouped = require("tether.context").diagnostics(util.abspath(utf))
+  local range = grouped[1] and grouped[1].diagnostics[1] and grouped[1].diagnostics[1].range
+  check(range and range.start.character == 1, "diagnostic start column is UTF-16")
+  check(range and range["end"].character == 2, "diagnostic end column is UTF-16")
+  vim.diagnostic.reset(utf_ns, utf_buf)
+  vim.cmd("edit " .. vim.fn.fnameescape(sample))
+end
+
 -- Keymaps and :TetherSend put a reference in Claude's prompt. Nothing is submitted.
 check(vim.fn.maparg("<leader>af", "n") ~= "", "default keymap <leader>af")
 check(vim.fn.maparg("<leader>ao", "n") ~= "", "default keymap <leader>ao in normal mode")
 check(vim.fn.maparg("<leader>ao", "x") ~= "", "default keymap <leader>ao in visual mode")
+check(vim.fn.maparg("<leader>ad", "n") ~= "", "default keymap <leader>ad")
+check(vim.fn.maparg("<leader>an", "n") ~= "", "default keymap <leader>an")
+check(vim.fn.maparg("<leader>aj", "n") ~= "", "default keymap <leader>aj")
 
 local multi = root .. "/multi.lua"
 vim.fn.writefile({ "local a = 1", "local b = 2", "local c = 3", "return a + b + c" }, multi)
@@ -499,6 +641,17 @@ do
   swept.stop()
 end
 
+do
+  local dir = root .. "/claude-stale"
+  vim.fn.mkdir(dir, "p")
+  local dead = dir .. "/1.lock"
+  local live = dir .. "/2.lock"
+  vim.fn.writefile({ vim.json.encode({ pid = 999999, ideName = "Neovim" }) }, dead)
+  vim.fn.writefile({ vim.json.encode({ pid = vim.fn.getpid(), ideName = "Neovim" }) }, live)
+  local found = require("tether.adapters.claude").stale(dir)
+  check(#found == 1 and found[1] == dead, "claude stale lists a dead Neovim lock and keeps a live one")
+end
+
 -- Codex TUI: length-prefixed JSON over the unix socket.
 local pipe = vim.uv.new_pipe(false)
 local connected, connect_err = false, nil
@@ -535,6 +688,43 @@ check(active and util.abspath(active.fsPath) == util.abspath(sample), "codex act
 check(active and active.path == "hello.lua", "codex relative path")
 check(active and active.activeSelectionContent == "", "codex empty selection")
 check(state.codex.client_count() == 1, "codex counts its client")
+pipe:write(frame.encode({
+  type = "request",
+  requestId = "req-unknown",
+  method = "open-diff",
+  params = {},
+}))
+check(
+  wait_until(2000, function()
+    local text = table.concat(require("tether.log").get(), "\n")
+    return text:find("no handler for open-diff", 1, true) ~= nil
+  end),
+  "codex logs a method it does not handle"
+)
+do
+  local first = root .. "/focus-a.lua"
+  local second = root .. "/focus-b.lua"
+  vim.fn.writefile({ "a" }, first)
+  vim.fn.writefile({ "b" }, second)
+  vim.cmd("edit " .. vim.fn.fnameescape(first))
+  vim.cmd("edit " .. vim.fn.fnameescape(second))
+  vim.bo[vim.fn.bufnr(second)].modified = true
+  local ide = require("tether.context").codex(root)
+  check(
+    ide.openTabs[1] and util.abspath(ide.openTabs[1].fsPath) == util.abspath(second),
+    "codex lists the focused file first"
+  )
+  check(ide.openTabs[1].isDirty == true, "codex reports a dirty buffer")
+  local dirty
+  for _, file in ipairs(require("tether.context").gemini().workspaceState.openFiles) do
+    if util.abspath(file.path) == util.abspath(second) then
+      dirty = file.isDirty
+    end
+  end
+  check(dirty == true, "gemini reports a dirty buffer")
+  vim.bo[vim.fn.bufnr(second)].modified = false
+  vim.cmd("edit " .. vim.fn.fnameescape(sample))
+end
 pipe:close()
 check(
   wait_until(2000, function()
@@ -616,13 +806,25 @@ do
     return found.connected
   end)
   check(attached and found.version == "test", "opencode finds the running server")
-  local sent = found.append(sample)
-  local pushed = wait_until(3000, function()
-    return appended ~= nil
+  local result
+  local started = found.append(sample, function(ok)
+    result = ok
   end)
-  check(sent and pushed and appended:find("hello.lua", 1, true) ~= nil, "opencode receives editor context")
+  check(started == true and result == nil, "opencode does not report success before the server answers")
+  local pushed = wait_until(3000, function()
+    return appended ~= nil and result == true
+  end)
+  check(pushed and appended:find("hello.lua", 1, true) ~= nil, "opencode receives editor context")
   found.stop()
   mock.close()
+
+  local down = require("tether.adapters.opencode").start({ url = "http://127.0.0.1:1" })
+  local failed
+  local started_down = down.append("hi", function(ok)
+    failed = ok
+  end)
+  check(started_down == false and failed == false, "opencode append fails before a server is connected")
+  down.stop()
 
   local dead_dir = root .. "/opencode-dead"
   vim.fn.mkdir(dead_dir, "p")
@@ -796,6 +998,57 @@ do
     calls():find('send-text w1:p3 @"my notes.lua#L1" ', 1, true) ~= nil,
     'a path with spaces is sent as @"my notes.lua#L1"'
   )
+  vim.cmd("enew")
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, { "unsaved line" })
+  answer = 1
+  check(
+    send_and_wait("selection", { 1, 1 }, function()
+      return calls():find("send-text w1:p3 unsaved line ", 1, true) ~= nil
+    end),
+    "an unnamed buffer sends its text"
+  )
+  vim.cmd("edit " .. vim.fn.fnameescape(multi))
+  local diag_ns = vim.api.nvim_create_namespace("tether-send-diag")
+  vim.diagnostic.set(diag_ns, 0, {
+    { lnum = 3, col = 0, message = "needs a name", severity = vim.diagnostic.severity.ERROR },
+  })
+  vim.api.nvim_win_set_cursor(0, { 4, 0 })
+  answer = 1
+  check(
+    send_and_wait("diagnostic", nil, function()
+      return calls():find("@multi.lua#L4 [Error] needs a name", 1, true) ~= nil
+    end),
+    "a diagnostic is sent with its message and line"
+  )
+  vim.diagnostic.reset(diag_ns, 0)
+  local focused
+  tether.state().herdr.focus("w1:p9", function(ok)
+    focused = ok
+  end)
+  check(
+    wait_until(2000, function()
+      return focused == true and calls():find("agent focus w1:p9", 1, true) ~= nil
+    end),
+    "herdr focuses an agent pane"
+  )
+  local saved = table.concat(vim.fn.readfile(root .. "/last.json"), "\n")
+  check(saved:find("w1:p3", 1, true) ~= nil, "the last agent pane is remembered")
+  local fn_file = root .. "/fn.lua"
+  vim.fn.writefile({ "local function add(x)", "  return x", "end" }, fn_file)
+  vim.cmd("edit " .. vim.fn.fnameescape(fn_file))
+  vim.api.nvim_win_set_cursor(0, { 2, 2 })
+  local has_lua_parser = pcall(vim.treesitter.get_parser, 0, "lua")
+  if has_lua_parser then
+    answer = 1
+    check(
+      send_and_wait("node", nil, function()
+        return calls():find("@fn.lua#L1", 1, true) ~= nil
+      end),
+      "a function node is sent as a line range"
+    )
+  else
+    check(tether.send("node") == false, "node send reports a missing syntax tree")
+  end
   vim.cmd("edit " .. vim.fn.fnameescape(multi))
 
   -- pick = "auto" skips the picker when there is only one agent.
@@ -836,6 +1089,7 @@ do
     "  505     1 node /opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
     "  506     1 muse-bin-0.1.0-R708.1",
     "  507     1 /tmp/my-codex-helper",
+    "  508     1 mycli",
   }, "\n"))
   check(under("200") == "claude", "tmux finds Claude under a pane's shell")
   check(under("300") == "gemini", "tmux finds a node-based agent by its script name")
@@ -848,6 +1102,9 @@ do
   check(under("505") == "pi", "tmux finds Pi launched from its package path")
   check(under("506") == "muse", "tmux finds a versioned Muse binary")
   check(under("507") == nil, "tmux ignores a command that only contains an agent name")
+  check(under("508") == nil, "tmux ignores a basename that is not in the built-in list")
+  local custom = tmux_adapter.parse_processes("  508     1 mycli\n", { "mycli" })
+  check(custom("508") == "mycli", "tmux agents option recognizes an extra basename")
   local found, here = tmux_adapter.find(rows, under, "%1")
   check(here and here.workspace == "$1" and here.tab == "@1", "tmux knows which session Neovim is in")
   local ranked = require("tether.panes").rank(found, "/p", here)

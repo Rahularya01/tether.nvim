@@ -1,6 +1,7 @@
 local context = require("tether.context")
 local diff = require("tether.diff")
 local http = require("tether.http")
+local log = require("tether.log")
 local mcp = require("tether.mcp")
 local util = require("tether.util")
 
@@ -34,11 +35,12 @@ local function tool_schema()
   }
 end
 
--- Remove discovery files left by Neovims that exited without cleaning up.
-local function sweep(dir)
+-- Discovery files left by a Neovim that exited without deleting them.
+function M.stale(dir)
+  local stale = {}
   local scanner = vim.uv.fs_scandir(dir)
   if not scanner then
-    return
+    return stale
   end
   while true do
     local name = vim.uv.fs_scandir_next(scanner)
@@ -51,9 +53,16 @@ local function sweep(dir)
       local ok, lines = pcall(vim.fn.readfile, path)
       local decoded_ok, data = pcall(vim.json.decode, ok and table.concat(lines, "\n") or "")
       if decoded_ok and type(data) == "table" and type(data.ideInfo) == "table" and data.ideInfo.name == "neovim" then
-        vim.uv.fs_unlink(path)
+        stale[#stale + 1] = path
       end
     end
+  end
+  return stale
+end
+
+local function sweep(dir)
+  for _, path in ipairs(M.stale(dir)) do
+    vim.uv.fs_unlink(path)
   end
 end
 
@@ -101,13 +110,14 @@ function M.start(opts)
         reply({
           protocolVersion = params.protocolVersion or "2025-06-18",
           capabilities = { tools = vim.empty_dict() },
-          serverInfo = { name = "tether.nvim", version = "0.2.0" },
+          serverInfo = { name = "tether.nvim", version = "0.3.0" },
         })
       end,
       ["tools/list"] = function(_, reply)
         reply({ tools = tool_schema() })
       end,
       ["tools/call"] = function(params, reply)
+        log.record("gemini", "tools/call " .. tostring(params.name))
         local args = params.arguments or {}
         if params.name == "openDiff" then
           local path = util.abspath(args.filePath)
@@ -163,6 +173,7 @@ function M.start(opts)
       local header = request.headers["authorization"] or ""
       local got = header:match("^[Bb]earer%s+(.+)$") or header
       if got ~= token then
+        log.record("gemini", "rejected handshake")
         respond({ status = 401, headers = { Connection = "close" }, body = "", close = true })
         return
       end

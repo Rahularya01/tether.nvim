@@ -1,5 +1,6 @@
 local context = require("tether.context")
 local frame = require("tether.frame")
+local log = require("tether.log")
 local util = require("tether.util")
 
 local M = {}
@@ -49,6 +50,8 @@ local function handle_message(message)
     return nil
   end
   if message.method ~= "ide-context" then
+    -- Codex's socket only asks for editor context. A new method shows up here.
+    log.record("codex", "no handler for " .. tostring(message.method))
     return {
       type = "response",
       requestId = message.requestId,

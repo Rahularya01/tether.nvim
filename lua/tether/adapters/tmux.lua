@@ -124,10 +124,32 @@ function M.parse_panes(stdout)
   return rows
 end
 
-local function basename_agent(token)
+local function extra_aliases(spec)
+  local extra = {}
+  if type(spec) ~= "table" then
+    return extra
+  end
+  local list = vim.islist(spec)
+  if list then
+    for _, name in ipairs(spec) do
+      if type(name) == "string" and name ~= "" then
+        extra[name:lower()] = name:lower()
+      end
+    end
+  else
+    for key, value in pairs(spec) do
+      if type(key) == "string" and key ~= "" then
+        extra[key:lower()] = type(value) == "string" and value ~= "" and value or key:lower()
+      end
+    end
+  end
+  return extra
+end
+
+local function basename_agent(token, extra)
   local base = vim.fs.basename(token):lower()
   base = base:gsub("%.exe$", ""):gsub("%.cmd$", ""):gsub("%.bat$", ""):gsub("%.ps1$", "")
-  local name = ALIASES[base] or ALIASES[base:gsub("%.js$", "")]
+  local name = (extra and extra[base]) or ALIASES[base] or ALIASES[base:gsub("%.js$", "")]
   if name then
     return name
   end
@@ -166,17 +188,17 @@ local function cursor_alias(token)
   end
 end
 
-local function token_agent(token)
-  return basename_agent(token) or package_agent(token) or cursor_alias(token)
+local function token_agent(token, extra)
+  return basename_agent(token, extra) or package_agent(token) or cursor_alias(token)
 end
 
-local function agent_name(command)
+local function agent_name(command, extra)
   if not command or command == "" then
     return nil
   end
   local words = vim.split(vim.trim(command), "%s+")
   for i = 1, math.min(2, #words) do
-    local name = token_agent(words[i])
+    local name = token_agent(words[i], extra)
     if name then
       return name
     end
@@ -184,7 +206,9 @@ local function agent_name(command)
 end
 
 -- ps -A -o pid=,ppid=,args= -> the first agent CLI under each pid.
-function M.parse_processes(stdout)
+-- extra maps additional basenames onto agent labels (tmux.agents).
+function M.parse_processes(stdout, extra)
+  extra = extra_aliases(extra)
   local children, args = {}, {}
   for line in (stdout or ""):gmatch("[^\n]+") do
     local pid, ppid, command = line:match("^%s*(%d+)%s+(%d+)%s+(.*)$")
@@ -200,7 +224,7 @@ function M.parse_processes(stdout)
       local pid = table.remove(queue, 1)
       if not seen[pid] then
         seen[pid] = true
-        local name = agent_name(args[pid])
+        local name = agent_name(args[pid], extra)
         if name then
           return name
         end
@@ -213,7 +237,8 @@ function M.parse_processes(stdout)
 end
 
 -- The tmux panes running an agent, plus where Neovim is (nil outside tmux).
-function M.find(rows, agent_under, own_pane)
+function M.find(rows, agent_under, own_pane, extra)
+  extra = extra_aliases(extra)
   local here
   for _, row in ipairs(rows) do
     if own_pane and row.pane_id == own_pane then
@@ -222,7 +247,7 @@ function M.find(rows, agent_under, own_pane)
   end
   local agents = {}
   for _, row in ipairs(rows) do
-    local name = agent_name(row.pane_current_command) or agent_under(row.pane_pid)
+    local name = agent_name(row.pane_current_command, extra) or agent_under(row.pane_pid)
     if name then
       agents[#agents + 1] = {
         agent = name,
@@ -253,7 +278,28 @@ end
 -- opts.bin: tmux binary. opts.socket: a tmux -L socket name (tests use their own server).
 function M.start(opts)
   opts = opts or {}
+  local extra = extra_aliases(opts.agents)
   local bin = opts.bin or binary()
+  -- ps -A walks every process. Reuse a snapshot for a second so repeated sends stay cheap.
+  local cached_ps, cached_at
+  local function processes(callback)
+    local now = vim.uv.now()
+    if cached_ps and cached_at and (now - cached_at) < 1000 then
+      vim.schedule(function()
+        callback(cached_ps)
+      end)
+      return
+    end
+    vim.system({ "ps", "-A", "-o", "pid=,ppid=,args=" }, { text = true }, function(ps)
+      vim.schedule(function()
+        if ps and ps.code == 0 then
+          cached_ps = ps.stdout or ""
+          cached_at = vim.uv.now()
+        end
+        callback(cached_ps or "")
+      end)
+    end)
+  end
   local base = { bin }
   if opts.socket then
     vim.list_extend(base, { "-L", opts.socket })
@@ -286,15 +332,29 @@ function M.start(opts)
         end)
         return
       end
-      vim.system({ "ps", "-A", "-o", "pid=,ppid=,args=" }, { text = true }, function(ps)
-        vim.schedule(function()
-          local own = vim.env.TMUX and vim.env.TMUX ~= "" and vim.env.TMUX_PANE or nil
-          local agents, here = M.find(M.parse_panes(listing.stdout), M.parse_processes(ps and ps.stdout), own)
-          handle.here = here
-          local ranked = panes.rank(agents, vim.fn.getcwd(), here, handle.last)
-          handle.detail = #ranked == 0 and "no agent pane" or (#ranked .. " agent pane(s)")
-          callback(ranked)
-        end)
+      processes(function(stdout)
+        local own = vim.env.TMUX and vim.env.TMUX ~= "" and vim.env.TMUX_PANE or nil
+        local agents, here = M.find(M.parse_panes(listing.stdout), M.parse_processes(stdout, extra), own, extra)
+        handle.here = here
+        local ranked = panes.rank(agents, vim.fn.getcwd(), here, handle.last)
+        handle.detail = #ranked == 0 and "no agent pane" or (#ranked .. " agent pane(s)")
+        callback(ranked)
+      end)
+    end)
+  end
+
+  function handle.focus(pane_id, done)
+    if not bin then
+      if done then
+        done(false, handle.detail)
+      end
+      return
+    end
+    vim.system(tmux({ "select-pane", "-t", pane_id }), { text = true }, function(out)
+      vim.schedule(function()
+        if done then
+          done(out and out.code == 0, ((out and out.stdout) or "") .. ((out and out.stderr) or ""))
+        end
       end)
     end)
   end

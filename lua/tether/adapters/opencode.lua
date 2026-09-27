@@ -1,3 +1,4 @@
+local http = require("tether.http")
 local util = require("tether.util")
 
 local M = {}
@@ -47,32 +48,31 @@ local function password_for(dir, data, opts)
   end
 end
 
+-- Talks to the local OpenCode server in-process. The password stays in the
+-- Authorization header, and the callback runs after the response arrives.
 local function request(url, username, password, method, body, callback)
-  local cmd = {
-    "curl",
-    "-sS",
-    "--max-time",
-    "2",
-    "-X",
-    method or "GET",
-    "-H",
-    "Accept: application/json",
-  }
+  local headers = {}
   if password and password ~= "" then
-    table.insert(cmd, "--user")
-    table.insert(cmd, (username or "opencode") .. ":" .. password)
+    headers.Authorization = "Basic " .. vim.base64.encode((username or "opencode") .. ":" .. password)
   end
   if body then
-    table.insert(cmd, "-H")
-    table.insert(cmd, "Content-Type: application/json")
-    table.insert(cmd, "-d")
-    table.insert(cmd, body)
+    headers["Content-Type"] = "application/json"
   end
-  table.insert(cmd, url)
-  vim.system(cmd, { text = true }, function(out)
-    vim.schedule(function()
-      callback(out or {})
-    end)
+  http.request({
+    url = url,
+    method = method or "GET",
+    headers = headers,
+    body = body,
+    timeout = 2000,
+  }, function(res)
+    local status = res and res.status
+    local ok = status and status >= 200 and status < 300
+    callback({
+      code = ok and 0 or 1,
+      status = status,
+      stdout = res and res.body or "",
+      err = (res and res.err) or (status and ("HTTP " .. status)) or "request failed",
+    })
   end)
 end
 
@@ -151,15 +151,22 @@ function M.start(opts)
   end
 
   handle.scan = scan
-  handle.append = function(text)
+  -- callback(ok, err) runs after OpenCode answers. Returns false when there is no server to ask.
+  handle.append = function(text, callback)
     if not handle.connected or not handle.url then
-      return nil, "no running OpenCode server"
+      if callback then
+        callback(false, "no running OpenCode server")
+      end
+      return false
     end
     local directory = vim.uri_encode(vim.fn.getcwd())
     local url = handle.url .. "/tui/append-prompt?directory=" .. directory
     request(url, username, handle.password, "POST", vim.json.encode({ text = text }), function(out)
-      if out.code ~= 0 then
-        vim.notify("tether: OpenCode did not accept editor context", vim.log.levels.WARN)
+      local ok = out.code == 0
+      if callback then
+        callback(ok, ok and nil or (out.err or "OpenCode did not accept editor context"))
+      elseif not ok then
+        vim.notify("tether: " .. (out.err or "OpenCode did not accept editor context"), vim.log.levels.WARN)
       end
     end)
     return true
