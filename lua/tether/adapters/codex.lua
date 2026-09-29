@@ -73,7 +73,7 @@ local function handle_message(message)
   }
 end
 
-local function listen(path, clients)
+local function listen(path, clients, changed)
   local parent = vim.fn.fnamemodify(path, ":h")
   util.mkdir(parent, 448)
   pcall(vim.uv.fs_unlink, path)
@@ -88,11 +88,13 @@ local function listen(path, clients)
     local client = vim.uv.new_pipe(false)
     pipe:accept(client)
     clients[client] = true
+    changed()
     local function close()
       clients[client] = nil
       if not client:is_closing() then
         client:close()
       end
+      changed()
     end
     local decode = frame.decoder()
     client:read_start(function(read_err, data)
@@ -137,6 +139,13 @@ function M.start(opts)
     refresh = function() end,
   }
 
+  -- init.lua sets handle.on_change to hear about clients connecting and dropping.
+  local function changed()
+    if handle.on_change then
+      vim.schedule(handle.on_change)
+    end
+  end
+
   local function sync_status()
     handle.sockets, handle.errors = {}, {}
     for _, path in ipairs(wanted) do
@@ -161,7 +170,7 @@ function M.start(opts)
       if alive then
         blocked[path] = path .. " is already served by another IDE"
       else
-        local pipe, err = listen(path, clients)
+        local pipe, err = listen(path, clients, changed)
         pipes[path] = pipe
         blocked[path] = err
       end
@@ -213,6 +222,14 @@ function M.start(opts)
       n = n + 1
     end
     return n
+  end
+  handle.describe = function()
+    local detail = #handle.sockets > 0 and table.concat(handle.sockets, ", ") or "no socket"
+    detail = detail .. "  clients=" .. handle.client_count()
+    if #handle.errors > 0 then
+      detail = detail .. "  (" .. table.concat(handle.errors, "; ") .. ", retrying)"
+    end
+    return detail
   end
   return handle
 end

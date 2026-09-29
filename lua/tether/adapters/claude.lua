@@ -116,6 +116,32 @@ local function find_buf(path)
   end
 end
 
+-- A window Claude's openFile can take over: a plain file buffer, not a
+-- terminal, a review diff, or a floating window. Prefers the current window.
+local function editing_window()
+  local function usable(win)
+    if vim.api.nvim_win_get_config(win).relative ~= "" or vim.wo[win].diff then
+      return false
+    end
+    return vim.bo[vim.api.nvim_win_get_buf(win)].buftype == ""
+  end
+  local current = vim.api.nvim_get_current_win()
+  if usable(current) then
+    return current
+  end
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if usable(win) then
+      return win
+    end
+  end
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    if usable(win) then
+      return win
+    end
+  end
+  return current
+end
+
 local function selection_payload(reading, fallback_path)
   if not reading or not fallback_path then
     return vim.json.encode({ success = false, message = "No active editor found" })
@@ -142,15 +168,13 @@ local function call_tool(name, args, reply, push)
     reply(mcp.text(selection_payload(snap.selection, path)))
   elseif name == "getLatestSelection" then
     local snap = context.snapshot()
-    local reading = snap.latest or snap.selection
-    local path = (snap.latest and snap.active and snap.active.path) or (snap.active and snap.active.path)
-    if snap.latest and snap.latest.path then
-      path = snap.latest.path
-    end
+    local latest = snap.latest
+    local reading = latest and latest.selection or snap.selection
+    local path = (latest and latest.path) or (snap.active and snap.active.path)
     if not reading then
       reply(mcp.text(vim.json.encode({ success = false, message = "No selection available" })))
     else
-      reply(mcp.text(selection_payload(reading.selection or reading, path)))
+      reply(mcp.text(selection_payload(reading, path)))
     end
   elseif name == "getOpenEditors" then
     local snap = context.snapshot()
@@ -191,7 +215,12 @@ local function call_tool(name, args, reply, push)
     end
     local front = args.makeFrontmost ~= false
     if front then
-      vim.cmd("edit " .. vim.fn.fnameescape(path))
+      vim.api.nvim_set_current_win(editing_window())
+      local edited, edit_err = pcall(vim.cmd, "edit " .. vim.fn.fnameescape(path))
+      if not edited then
+        reply(mcp.text(vim.json.encode({ success = false, message = tostring(edit_err) }), true))
+        return
+      end
       if type(args.startText) == "string" and args.startText ~= "" then
         local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
         for i, line in ipairs(lines) do
@@ -303,7 +332,7 @@ local function call_tool(name, args, reply, push)
       if push then
         push()
       end
-    end, { label = args.tab_name })
+    end, { label = args.tab_name, adapter = "claude" })
     if not opened then
       reply(mcp.text(tostring(err), true))
     end
@@ -380,6 +409,13 @@ function M.start(opts)
     clients = 0,
   }
 
+  -- init.lua sets handle.on_change to hear about clients connecting and dropping.
+  local function changed()
+    if handle.on_change then
+      vim.schedule(handle.on_change)
+    end
+  end
+
   local server
   local function push(force, get)
     if not server then
@@ -420,7 +456,7 @@ function M.start(opts)
         reply({
           protocolVersion = version,
           capabilities = { tools = vim.empty_dict() },
-          serverInfo = { name = "tether.nvim", version = "0.3.0" },
+          serverInfo = mcp.server_info,
         })
       end,
       ["tools/list"] = function(_, reply)
@@ -452,6 +488,8 @@ function M.start(opts)
     port = 0,
     name = "claude",
     auth_token = token,
+    on_open = changed,
+    on_close = changed,
     on_message = function(client, text, done)
       -- Replies are matched by id, so the next message does not wait for this one.
       -- openDiff replies only after a review, and pings or close_tab must still get through.
@@ -506,6 +544,9 @@ function M.start(opts)
   end
   handle.client_count = function()
     return #server.clients()
+  end
+  handle.describe = function()
+    return string.format("127.0.0.1:%s  clients=%d", tostring(handle.port), #server.clients())
   end
   return handle
 end

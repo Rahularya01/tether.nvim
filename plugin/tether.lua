@@ -67,6 +67,10 @@ vim.api.nvim_create_user_command("TetherFocus", function()
   require("tether").focus()
 end, { desc = "Focus the agent pane that last received text" })
 
+vim.api.nvim_create_user_command("TetherAgents", function()
+  require("tether").agents()
+end, { desc = "List Herdr and tmux agent panes" })
+
 vim.api.nvim_create_user_command("TetherLog", function()
   require("tether").show_log()
 end, { desc = "Show recent harness protocol events" })
@@ -96,6 +100,76 @@ end, { desc = "Add the diagnostic under the cursor to the AI prompt without send
 vim.api.nvim_create_user_command("TetherSendNode", function()
   require("tether").send_node()
 end, { desc = "Add the function or type under the cursor to the AI prompt without sending it" })
+
+vim.api.nvim_create_user_command("TetherSendPrompt", function()
+  require("tether").send_prompt()
+end, { desc = "Ask for an instruction and add it with the file or selection" })
+
+vim.api.nvim_create_user_command("TetherSendMany", function(args)
+  local range = command_range(args)
+  if range then
+    require("tether").send_many("selection", range)
+  else
+    require("tether").send_many("file")
+  end
+end, { range = true, desc = "Add the file or selection to several agent prompts" })
+
+vim.api.nvim_create_user_command("TetherSendQuickfix", function()
+  require("tether").send("quickfix")
+end, { desc = "Add the quickfix list to an agent's prompt" })
+
+vim.api.nvim_create_user_command("TetherSendDiff", function(args)
+  local how = args.fargs[1]
+  if how == "staged" then
+    require("tether").send_diff("staged")
+  elseif how == "base" then
+    require("tether").send_diff("base", args.fargs[2])
+  else
+    require("tether").send_diff("unstaged")
+  end
+end, {
+  nargs = "*",
+  complete = function()
+    return { "staged", "unstaged", "base" }
+  end,
+  desc = "Add a git diff to an agent's prompt",
+})
+
+vim.api.nvim_create_user_command("TetherSendTerminal", function(args)
+  require("tether").send_terminal(args.args)
+end, { nargs = "?", desc = "Add the last lines of a terminal buffer to an agent's prompt" })
+
+vim.api.nvim_create_user_command("TetherSendReferences", function()
+  require("tether").send_references()
+end, { desc = "Add the LSP definition and references under the cursor" })
+
+vim.api.nvim_create_user_command("TetherSetupHooks", function()
+  require("tether").install_hooks()
+end, { desc = "Install Claude Code hooks that report edits to Neovim" })
+
+vim.api.nvim_create_user_command("TetherRemoveHooks", function()
+  require("tether").remove_hooks()
+end, { desc = "Remove the Claude Code hooks tether installed" })
+
+vim.api.nvim_create_user_command("TetherRevertHunk", function()
+  require("tether").revert_hunk()
+end, { desc = "Revert the agent hunk under the cursor" })
+
+vim.api.nvim_create_user_command("TetherUndoTurn", function()
+  require("tether").undo_turn()
+end, { desc = "Restore files touched by the latest agent turn" })
+
+vim.api.nvim_create_user_command("TetherWatch", function(args)
+  require("tether").watch(args.args ~= "" and args.args or nil)
+end, { nargs = "?", complete = "dir", desc = "Watch the project for agent edits" })
+
+vim.api.nvim_create_user_command("TetherSpawn", function(args)
+  require("tether").spawn(args.args)
+end, { nargs = 1, desc = "Start an agent in a new git worktree" })
+
+vim.api.nvim_create_user_command("TetherWorktreeClean", function()
+  require("tether").worktree_clean()
+end, { desc = "Remove a tether worktree that has no uncommitted work" })
 
 -- The :Ai* names from before the rename to tether.nvim.
 for _, name in ipairs({ "Start", "Stop", "Status", "Env", "Accept", "Reject", "Send", "SendFile", "SendSelection" }) do

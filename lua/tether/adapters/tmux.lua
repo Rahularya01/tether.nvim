@@ -359,6 +359,31 @@ function M.start(opts)
     end)
   end
 
+  -- New pane running command in dir. done(ok, pane_id, message).
+  function handle.spawn(dir, command, done)
+    if not bin then
+      if done then
+        done(false, nil, handle.detail)
+      end
+      return
+    end
+    vim.system(
+      tmux({ "split-window", "-d", "-c", dir, "-P", "-F", "#{pane_id}", command }),
+      { text = true },
+      function(out)
+        vim.schedule(function()
+          local pane = out and out.code == 0 and vim.trim(out.stdout or "") or nil
+          if pane == "" then
+            pane = nil
+          end
+          if done then
+            done(pane ~= nil, pane, vim.trim(((out and out.stdout) or "") .. ((out and out.stderr) or "")))
+          end
+        end)
+      end
+    )
+  end
+
   function handle.insert(pane_id, text, done)
     handle.last = pane_id
     vim.system(tmux({ "send-keys", "-t", pane_id, "-l", "--", text }), { text = true }, function(out)

@@ -109,6 +109,53 @@ function M.start(opts)
     end)
   end
 
+  local function pane_from(stdout)
+    local ok, decoded = pcall(vim.json.decode, stdout or "")
+    if ok and type(decoded) == "table" then
+      local result = decoded.result or decoded
+      if type(result) == "table" then
+        return result.pane_id or result.paneId or result.id
+      end
+    end
+    local line = vim.trim(stdout or "")
+    if line ~= "" and not line:find("\n") then
+      return line
+    end
+  end
+
+  -- New pane in dir, then start the agent in it. done(ok, pane_id, message).
+  function handle.spawn(dir, kind, done)
+    if not bin then
+      if done then
+        done(false, nil, handle.detail)
+      end
+      return
+    end
+    vim.system(
+      { bin, "pane", "split", "--cwd", dir, "--direction", "right", "--no-focus" },
+      { text = true },
+      function(split)
+        vim.schedule(function()
+          local pane = split and split.code == 0 and pane_from(split.stdout) or nil
+          if not pane then
+            if done then
+              done(false, nil, vim.trim(((split and split.stdout) or "") .. ((split and split.stderr) or "")))
+            end
+            return
+          end
+          vim.system({ bin, "agent", "start", kind, "--kind", kind, "--pane", pane }, { text = true }, function(started)
+            vim.schedule(function()
+              local message = vim.trim(((started and started.stdout) or "") .. ((started and started.stderr) or ""))
+              if done then
+                done(started and started.code == 0, pane, message)
+              end
+            end)
+          end)
+        end)
+      end
+    )
+  end
+
   function handle.insert(pane_id, text, done)
     if not bin then
       if done then

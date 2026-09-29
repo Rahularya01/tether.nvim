@@ -354,6 +354,35 @@ check(
   "the waiting review is rejected"
 )
 
+-- openFile edits in a file window, not in a terminal or other special buffer that has focus.
+do
+  local opened = root .. "/opened.lua"
+  vim.fn.writefile({ "return 1" }, opened)
+  vim.cmd("split")
+  vim.cmd("enew")
+  vim.bo.buftype = "nofile"
+  local term_win = vim.api.nvim_get_current_win()
+  local term_buf = vim.api.nvim_get_current_buf()
+  call(70, "openFile", { filePath = opened })
+  wait_msg(function(msg)
+    return msg.id == 70
+  end, "claude openFile answers")
+  check(
+    vim.api.nvim_win_get_buf(term_win) == term_buf and vim.bo[term_buf].buftype == "nofile",
+    "openFile leaves a special-buffer window alone"
+  )
+  check(util.abspath(vim.api.nvim_buf_get_name(0)) == util.abspath(opened), "openFile edits in a file window")
+  pcall(vim.api.nvim_win_close, term_win, true)
+  pcall(vim.cmd, "bwipeout! " .. term_buf)
+  vim.cmd("edit " .. vim.fn.fnameescape(sample))
+  call(71, "getLatestSelection")
+  local latest = wait_msg(function(msg)
+    return msg.id == 71
+  end, "claude getLatestSelection answers")
+  local ok, body = pcall(vim.json.decode, tool_text(latest) or "")
+  check(ok and type(body) == "table" and body.success ~= nil, "getLatestSelection replies with a result")
+end
+
 -- Format-on-save during :write is what the agent is told was accepted.
 do
   local formatted = root .. "/fmt.lua"
@@ -459,6 +488,12 @@ check(vim.fn.maparg("<leader>ao", "x") ~= "", "default keymap <leader>ao in visu
 check(vim.fn.maparg("<leader>ad", "n") ~= "", "default keymap <leader>ad")
 check(vim.fn.maparg("<leader>an", "n") ~= "", "default keymap <leader>an")
 check(vim.fn.maparg("<leader>aj", "n") ~= "", "default keymap <leader>aj")
+check(vim.fn.maparg("<leader>ap", "n") ~= "", "default keymap <leader>ap")
+check(vim.fn.maparg("<leader>am", "n") ~= "", "default keymap <leader>am")
+check(vim.fn.maparg("<leader>aq", "n") ~= "", "default keymap <leader>aq")
+check(vim.fn.maparg("<leader>ag", "n") ~= "", "default keymap <leader>ag")
+check(vim.fn.maparg("<leader>at", "n") ~= "", "default keymap <leader>at")
+check(vim.fn.maparg("<leader>ar", "n") ~= "", "default keymap <leader>ar")
 
 local multi = root .. "/multi.lua"
 vim.fn.writefile({ "local a = 1", "local b = 2", "local c = 3", "return a + b + c" }, multi)
@@ -732,6 +767,35 @@ check(
   end),
   "codex forgets a closed client"
 )
+
+-- Clients are announced when they arrive, not on the next poll (which is 2s).
+do
+  local seen
+  local id = vim.api.nvim_create_autocmd("User", {
+    pattern = "TetherClient",
+    callback = function(args)
+      if args.data.adapter == "codex" then
+        seen = args.data.clients
+      end
+    end,
+  })
+  local extra = vim.uv.new_pipe(false)
+  extra:connect(root .. "/codex.sock", function() end)
+  check(
+    wait_until(250, function()
+      return seen == 1
+    end),
+    "a connecting client is announced without waiting for the poll"
+  )
+  extra:close()
+  check(
+    wait_until(250, function()
+      return seen == 0
+    end),
+    "a dropped client is announced without waiting for the poll"
+  )
+  vim.api.nvim_del_autocmd(id)
+end
 
 -- A socket another IDE is serving is left alone, then taken over once it goes away.
 do
@@ -1007,7 +1071,37 @@ do
     end),
     "an unnamed buffer sends its text"
   )
+  -- Paths are relative to the agent's directory when the pane reports it.
+  vim.fn.mkdir(root .. "/sub", "p")
+  local nested = root .. "/sub/nested.lua"
+  vim.fn.writefile({ "return 2" }, nested)
+  agents({ vim.tbl_extend("force", claude_pane, { cwd = root .. "/sub" }) })
+  vim.cmd("edit " .. vim.fn.fnameescape(nested))
+  answer = 1
+  send_and_wait("selection", { 1, 1 }, function()
+    return calls():find("send-text w1:p3 @nested.lua#L1 ", 1, true) ~= nil
+  end)
+  check(calls():find("send-text w1:p3 @nested.lua#L1 ", 1, true) ~= nil, "a path is relative to the agent's directory")
+  agents({ claude_pane })
+
+  -- Line numbers from an edited buffer may not match the file the agent reads.
+  local warned
+  local real_notify = vim.notify
+  vim.notify = function(msg, level)
+    if level == vim.log.levels.WARN and msg:find("unsaved", 1, true) then
+      warned = true
+    end
+  end
   vim.cmd("edit " .. vim.fn.fnameescape(multi))
+  vim.api.nvim_buf_set_lines(0, 0, 0, false, { "inserted" })
+  tether.send("selection", { 2, 3 })
+  check(warned == true, "an edited buffer warns that line numbers may not match the file")
+  warned = nil
+  tether.send("file")
+  check(warned == nil, "sending the whole file does not warn about line numbers")
+  vim.notify = real_notify
+  vim.bo.modified = false
+  vim.cmd("edit! " .. vim.fn.fnameescape(multi))
   local diag_ns = vim.api.nvim_create_namespace("tether-send-diag")
   vim.diagnostic.set(diag_ns, 0, {
     { lnum = 3, col = 0, message = "needs a name", severity = vim.diagnostic.severity.ERROR },
@@ -1050,6 +1144,271 @@ do
     check(tether.send("node") == false, "node send reports a missing syntax tree")
   end
   vim.cmd("edit " .. vim.fn.fnameescape(multi))
+
+  local agent_mod = require("tether.agents")
+  check(
+    agent_mod.format_statusline({ { agent = { agent = "claude" } } }) == "claude:?",
+    "a pane with no status shows ?"
+  )
+  local shown_claude = vim.tbl_extend("force", claude_pane, {
+    agent_status = "idle",
+    cwd = root,
+    terminal_title = "older line\nfix the parser",
+  })
+  local shown_codex = vim.tbl_extend("force", codex_pane, { agent_status = "idle", cwd = root })
+  agents({ shown_claude, shown_codex })
+  local function wait_pane(status)
+    return wait_until(4000, function()
+      tether.state().herdr.refresh()
+      local list = tether.state().herdr.agents or {}
+      local claude, codex
+      for _, agent in ipairs(list) do
+        if agent.pane_id == "w1:p3" and agent.agent_status == status then
+          claude = true
+        end
+        if agent.pane_id == "w1:p4" then
+          codex = true
+        end
+      end
+      return claude and codex
+    end)
+  end
+  check(wait_pane("idle"), "herdr snapshot shows Claude idle")
+  local emitted
+  local group = vim.api.nvim_create_augroup("tether-test-agent", { clear = true })
+  vim.api.nvim_create_autocmd("User", {
+    group = group,
+    pattern = "TetherAgent",
+    callback = function(ev)
+      emitted = ev.data
+    end,
+  })
+  agent_mod.poll()
+  check(emitted == nil, "the first snapshot does not announce a status")
+  local status = tether.statusline()
+  check(
+    status:find("claude:idle", 1, true) ~= nil and status:find("codex:idle", 1, true) ~= nil,
+    "statusline names each agent state"
+  )
+  local function list_calls()
+    return select(2, calls():gsub("agent list", ""))
+  end
+  local before_lists = list_calls()
+  agent_mod.poll()
+  check(list_calls() == before_lists, "a dashboard refresh does not list Herdr again")
+
+  agents({ vim.tbl_extend("force", shown_claude, { agent_status = "blocked" }), shown_codex })
+  local blocked_note
+  local real_notify = vim.notify
+  vim.notify = function(msg, level)
+    if type(msg) == "string" and msg:find("is blocked", 1, true) then
+      blocked_note = msg
+    end
+    return real_notify(msg, level)
+  end
+  check(wait_pane("blocked"), "herdr snapshot shows Claude blocked")
+  agent_mod.poll()
+  vim.notify = real_notify
+  check(blocked_note ~= nil and blocked_note:find("claude", 1, true) ~= nil, "a move to blocked notifies")
+  check(
+    emitted and emitted.status == "blocked" and emitted.previous == "idle" and emitted.pane_id == "w1:p3",
+    "TetherAgent reports the status change"
+  )
+  check(tether.statusline():find("claude:blocked", 1, true) ~= nil, "statusline shows the new state")
+
+  local dash_file = root .. "/dash.lua"
+  vim.fn.writefile({ "return dash" }, dash_file)
+  vim.cmd("edit " .. vim.fn.fnameescape(dash_file))
+  agent_mod.open()
+  local dash_row
+  local shown = wait_until(2000, function()
+    local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+    for i, row in ipairs(lines) do
+      if row:find("claude", 1, true) and row:find("blocked", 1, true) and row:find("fix the parser", 1, true) then
+        dash_row = i
+        return true
+      end
+    end
+  end)
+  check(shown, "the agent list shows state, and the last line of the title")
+  local rows = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+  local directory = false
+  for _, row in ipairs(rows) do
+    if row:find("tether-test", 1, true) then
+      directory = true
+    end
+  end
+  check(directory, "the agent list shows the directory")
+  if dash_row then
+    vim.api.nvim_win_set_cursor(0, { dash_row, 0 })
+    vim.fn.maparg("<CR>", "n", false, true).callback()
+    check(
+      wait_until(2000, function()
+        return calls():find("agent focus w1:p3", 1, true) ~= nil
+      end),
+      "Enter in the agent list focuses that pane"
+    )
+    vim.fn.maparg("s", "n", false, true).callback()
+    check(
+      wait_until(2000, function()
+        return calls():find("send-text w1:p3 @dash.lua ", 1, true) ~= nil
+      end),
+      "s in the agent list sends the file from the previous window"
+    )
+  end
+  if vim.api.nvim_buf_get_name(0):find("tether://agents", 1, true) and #vim.api.nvim_list_wins() > 1 then
+    vim.cmd("close")
+  end
+
+  answer = 1
+  vim.cmd("edit " .. vim.fn.fnameescape(multi))
+  vim.fn.setqflist({ { filename = multi, lnum = 2, text = "qf-marker" } })
+  check(
+    send_and_wait("quickfix", nil, function()
+      return calls():find("qf-marker", 1, true) ~= nil and calls():find("quickfix", 1, true) ~= nil
+    end),
+    "the quickfix list is sent as text"
+  )
+  vim.fn.setqflist({})
+
+  vim.cmd("enew")
+  local big = string.rep("x", 1600)
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, { big })
+  answer = 1
+  check(
+    send_and_wait("selection", { 1, 1 }, function()
+      return calls():find("/tether/send-", 1, true) ~= nil
+    end),
+    "a long send is a path to a cache file"
+  )
+  check(calls():find(big, 1, true) == nil, "a long send does not type the text into the pane")
+
+  vim.cmd("edit " .. vim.fn.fnameescape(multi))
+  local real_input = vim.ui.input
+  vim.ui.input = function(_, cb)
+    cb("please rename")
+  end
+  answer = 1
+  tether.send_prompt()
+  check(
+    wait_until(3000, function()
+      return calls():find("please rename", 1, true) ~= nil and calls():find("@multi.lua", 1, true) ~= nil
+    end),
+    "an instruction is sent with the file"
+  )
+  vim.ui.input = real_input
+
+  local many = root .. "/many.lua"
+  vim.fn.writefile({ "return many" }, many)
+  vim.cmd("edit " .. vim.fn.fnameescape(many))
+  agents({ shown_claude, shown_codex })
+  tether.send_many("file")
+  local chose = wait_until(3000, function()
+    return vim.api.nvim_buf_get_name(0):find("tether://send", 1, true) ~= nil
+  end)
+  check(chose, "multi-send opens a list of agents")
+  if chose then
+    local toggle = vim.fn.maparg("<Space>", "n", false, true)
+    toggle.callback()
+    vim.cmd("normal! j")
+    toggle.callback()
+    vim.fn.maparg("<CR>", "n", false, true).callback()
+    check(
+      wait_until(3000, function()
+        local log = calls()
+        return log:find("send-text w1:p3 @many.lua ", 1, true) ~= nil
+          and log:find("send-text w1:p4 many.lua ", 1, true) ~= nil
+      end),
+      "multi-send types the reference into each marked pane"
+    )
+  end
+
+  if vim.fn.executable("git") == 1 then
+    local repo = root .. "/diffr"
+    vim.fn.mkdir(repo, "p")
+    local git = function(args)
+      return vim.system(vim.list_extend({ "git" }, args), { cwd = repo, text = true }):wait()
+    end
+    git({ "init", "-q" })
+    git({ "config", "user.email", "tether@example.com" })
+    git({ "config", "user.name", "tether" })
+    vim.fn.writefile({ "base" }, repo .. "/diffed.txt")
+    git({ "add", "diffed.txt" })
+    local committed = git({ "commit", "-q", "-m", "base", "--no-gpg-sign" })
+    vim.fn.writefile({ "base", "unique-diff-line" }, repo .. "/diffed.txt")
+    vim.cmd.cd(repo)
+    answer = 1
+    tether.send_diff("unstaged")
+    local diff_sent = wait_until(3000, function()
+      return calls():find("unique-diff-line", 1, true) ~= nil
+    end)
+    vim.cmd.cd(root)
+    check(committed.code == 0 and diff_sent, "an unstaged diff is sent")
+  else
+    io.write("skip git diff send: git is not installed\n")
+  end
+
+  vim.cmd("enew")
+  local term_buf = vim.api.nvim_get_current_buf()
+  local term_chan = vim.api.nvim_open_term(term_buf, {})
+  vim.api.nvim_chan_send(term_chan, "unique-terminal-tail\r\n")
+  local term_ready = wait_until(2000, function()
+    local lines = vim.api.nvim_buf_get_lines(term_buf, 0, -1, false)
+    return table.concat(lines, "\n"):find("unique-terminal-tail", 1, true) ~= nil
+  end)
+  check(term_ready, "a terminal buffer keeps its scrollback")
+  if term_ready then
+    answer = 1
+    vim.api.nvim_set_current_buf(term_buf)
+    tether.send_terminal(10)
+    check(
+      wait_until(3000, function()
+        return calls():find("unique-terminal-tail", 1, true) ~= nil
+      end),
+      "the end of a terminal buffer is sent"
+    )
+  end
+  pcall(vim.cmd, "bdelete!")
+  vim.cmd("edit " .. vim.fn.fnameescape(multi))
+
+  local lsp_note
+  vim.notify = function(msg, level)
+    if type(msg) == "string" and msg:find("no LSP", 1, true) then
+      lsp_note = msg
+    end
+    return real_notify(msg, level)
+  end
+  tether.send_references()
+  vim.notify = real_notify
+  check(lsp_note ~= nil, "references send reports a missing LSP client")
+
+  local diffmod = require("tether.diff")
+  local reviewed = root .. "/reviewed.lua"
+  vim.fn.writefile({ "return 1" }, reviewed)
+  local opened = diffmod.open(reviewed, "return 2\n", function() end, { adapter = "claude" })
+  check(opened == true, "a review opens for comments")
+  check(vim.fn.maparg("gc", "n", false, true).buffer ~= 0, "gc is mapped on the proposal")
+  check(diffmod.add_comment(reviewed, 1, "use a clearer name") == true, "a review comment is stored")
+  local ns = vim.api.nvim_get_namespaces()["tether-review-comments"]
+  local marks = ns and vim.api.nvim_buf_get_extmarks(0, ns, 0, -1, {}) or {}
+  check(#marks == 1, "a review comment is an extmark")
+  diffmod.reject(reviewed)
+  check(
+    wait_until(3000, function()
+      local log = calls()
+      return log:find("I rejected the change to", 1, true) ~= nil and log:find("use a clearer name", 1, true) ~= nil
+    end),
+    "rejecting with comments types them into the agent pane"
+  )
+  local sends_before = select(2, calls():gsub("send%-text", ""))
+  diffmod.open(reviewed, "return 3\n", function() end, { adapter = "claude" })
+  diffmod.reject(reviewed)
+  vim.wait(250)
+  check(select(2, calls():gsub("send%-text", "")) == sends_before, "rejecting without comments sends nothing")
+
+  agents({ claude_pane })
+  vim.cmd("edit " .. vim.fn.fnameescape(multi))
+  vim.api.nvim_clear_autocmds({ group = group })
 
   -- pick = "auto" skips the picker when there is only one agent.
   tether.setup({
@@ -1175,6 +1534,123 @@ if vim.fn.executable("tmux") == 1 then
   tmux({ "kill-server" })
 else
   io.write("skip tmux end to end: tmux is not installed\n")
+end
+
+if vim.fn.executable("git") == 1 then
+  local act_repo = root .. "/activity-repo"
+  vim.fn.mkdir(act_repo, "p")
+  local function git_act(args, cwd)
+    return vim.system(vim.list_extend({ "git" }, args), { cwd = cwd or act_repo, text = true }):wait()
+  end
+  git_act({ "init", "-q" })
+  git_act({ "config", "user.email", "tether@example.com" })
+  git_act({ "config", "user.name", "tether" })
+  local tracked = act_repo .. "/tracked.lua"
+  vim.fn.writefile({ "one" }, tracked)
+  git_act({ "add", "tracked.lua" })
+  git_act({ "commit", "-q", "-m", "base", "--no-gpg-sign" })
+  vim.cmd("edit " .. vim.fn.fnameescape(tracked))
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, { "two" })
+  local activity = require("tether.activity")
+  activity.configure({ checkpoints = root .. "/checkpoints", follow = false })
+  check(activity.event({
+    hook_event_name = "PostToolUse",
+    tool_name = "Edit",
+    tool_input = { file_path = tracked },
+  }) == true, "an edit hook records the file")
+  local marks = vim.api.nvim_buf_get_extmarks(0, vim.api.nvim_get_namespaces()["tether-activity"], 0, -1, {})
+  check(#marks >= 1, "an agent edit gets a sign")
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })
+  check(activity.revert_hunk() == true, "the agent hunk under the cursor reverts")
+  check(vim.api.nvim_buf_get_lines(0, 0, -1, false)[1] == "one", "revert restores the baseline line")
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, { "two" })
+  activity.event({ tool_input = { file_path = tracked } })
+  local turn = activity.finish_turn()
+  check(type(turn) == "string" and turn ~= "", "Stop writes a checkpoint")
+  vim.fn.writefile({ "three" }, tracked)
+  vim.bo.modified = false
+  local restored = activity.undo_turn()
+  check(restored ~= nil and table.concat(vim.fn.readfile(tracked), "\n") == "one", "undo turn restores the checkpoint")
+
+  activity.start_watch(act_repo)
+  local watched = act_repo .. "/watched.lua"
+  vim.fn.writefile({ "seen" }, watched)
+  local saw = wait_until(3000, function()
+    return activity.seen(watched)
+  end)
+  activity.stop_watch()
+  check(saw, "the filesystem watch attributes a write to the agent")
+
+  local hooks = require("tether.hooks")
+  local planned = hooks.plan({ model = "test" }, true)
+  check(planned.model == "test", "hook install keeps the rest of the settings")
+  check(planned.hooks.PostToolUse[1].matcher == "Edit|Write|MultiEdit", "PostToolUse matches edit tools")
+  check(
+    planned.hooks.Stop[1].hooks[1].command:find("tether-claude-hook.sh", 1, true) ~= nil,
+    "Stop uses the tether hook"
+  )
+  local cleared = hooks.plan(planned, false)
+  check(cleared.hooks == nil and cleared.model == "test", "removing hooks leaves other settings")
+
+  local wt_repo = root .. "/wt-repo"
+  vim.fn.mkdir(wt_repo, "p")
+  local function git_wt(args)
+    return vim.system(vim.list_extend({ "git" }, args), { cwd = wt_repo, text = true }):wait()
+  end
+  git_wt({ "init", "-q" })
+  git_wt({ "config", "user.email", "tether@example.com" })
+  git_wt({ "config", "user.name", "tether" })
+  vim.fn.writefile({ "base" }, wt_repo .. "/base.lua")
+  git_wt({ "add", "base.lua" })
+  git_wt({ "commit", "-q", "-m", "base", "--no-gpg-sign" })
+  local log = root .. "/spawn.log"
+  local fake = root .. "/herdr-spawn"
+  vim.fn.writefile({
+    "#!/bin/sh",
+    'printf "%s\\n" "$*" >> ' .. vim.fn.shellescape(log),
+    'if [ "$1" = pane ] && [ "$2" = split ]; then',
+    '  printf \'%s\\n\' \'{"result":{"pane_id":"w1:p9"}}\'',
+    "fi",
+    "exit 0",
+  }, fake)
+  vim.uv.fs_chmod(fake, 493)
+  local handle = require("tether.adapters.herdr").start({ bin = fake, here = false })
+  local worktree = require("tether.worktree")
+  worktree.configure({ registry = root .. "/worktrees.json", directory = root .. "/made" })
+  local previous = vim.fn.getcwd()
+  vim.cmd.cd(wt_repo)
+  local record
+  worktree.spawn("claude", { herdr = handle }, function(item)
+    record = item
+  end)
+  check(
+    wait_until(4000, function()
+      return record ~= nil and record.pane_id == "w1:p9"
+    end),
+    "spawn creates a worktree and starts the agent in a Herdr pane"
+  )
+  local spawn_log = table.concat(vim.fn.readfile(log), "\n")
+  check(spawn_log:find("pane split", 1, true) ~= nil, "herdr spawn splits a pane")
+  check(spawn_log:find("agent start claude --kind claude --pane w1:p9", 1, true) ~= nil, "herdr spawn starts the agent")
+  if record then
+    vim.fn.writefile({ "branch" }, record.dir .. "/base.lua")
+    vim.system({ "git", "add", "base.lua" }, { cwd = record.dir }):wait()
+    vim.system({ "git", "commit", "-q", "-m", "agent", "--no-gpg-sign" }, { cwd = record.dir }):wait()
+    check(
+      worktree.on_status({ source = "herdr", pane_id = "w1:p9", status = "idle", previous = "working" }) == true,
+      "a finished worktree opens its branch diff"
+    )
+    local diffmod = require("tether.diff")
+    while diffmod.waiting()[1] do
+      diffmod.reject()
+    end
+    check(worktree.clean(record.dir) == true, "a clean worktree can be removed")
+    check(vim.uv.fs_stat(record.dir) == nil, "removing a worktree deletes the directory")
+  end
+  handle.stop()
+  vim.cmd.cd(previous)
+else
+  io.write("skip activity and worktree: git is not installed\n")
 end
 
 tether.stop()

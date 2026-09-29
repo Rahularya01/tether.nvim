@@ -48,6 +48,15 @@ Run the agent from a terminal in the project. `:terminal` inside Neovim is the s
 | Codex | From any terminal on this machine, run `/ide` in the TUI. |
 | OpenCode | tether.nvim finds a running OpenCode server and adds text to its prompt. |
 
+What each one gets:
+
+| | Editor context | Diff review | Send to prompt |
+| --- | --- | --- | --- |
+| Claude Code | yes | yes | yes |
+| Gemini CLI | yes | yes | in a Herdr or tmux pane |
+| Codex | yes | no | in a Herdr or tmux pane |
+| OpenCode | no | no | yes |
+
 ### Sending a file or selection
 
 | Keys | Command | Sends |
@@ -57,7 +66,14 @@ Run the agent from a terminal in the project. `:terminal` inside Neovim is the s
 | `<leader>ao` (normal) | `:TetherSendSelection` | the last visual selection |
 | `<leader>ad` | `:TetherSendDiagnostic` | the diagnostic under the cursor, with its message |
 | `<leader>an` | `:TetherSendNode` | the function or type around the cursor |
+| `<leader>ap` | `:TetherSendPrompt` | an instruction, together with the file or selection |
+| `<leader>am` | `:TetherSendMany` | the file or selection, to several agents |
+| `<leader>aq` | `:TetherSendQuickfix` | the quickfix list |
+| `<leader>ag` | `:TetherSendDiff` | the unstaged git diff. `staged` or `base main` chooses another |
+| `<leader>at` | `:TetherSendTerminal` | the last lines of a terminal buffer |
+| `<leader>ar` | `:TetherSendReferences` | the LSP definition and references under the cursor |
 | `<leader>aj` | `:TetherFocus` | jumps to the pane that last received text |
+| | `:TetherAgents` | lists agent panes. Enter focuses one, `s` sends the file |
 | | `:TetherSend` | the lines in a range, or the file without one |
 
 Where the text goes:
@@ -66,7 +82,21 @@ Where the text goes:
 2. **Claude Code over its IDE connection**, as an at-mention.
 3. **OpenCode**, appended to its prompt.
 
+Paths are written relative to the agent's directory when its pane reports one, and to Neovim's directory otherwise. The agent reads the file on disk, so line numbers from a buffer with unsaved changes can point at other lines. A send warns about this, or writes the buffer first with `save_on_send = true`.
+
 A notification says where the text went. A path with spaces is sent as `@"my file.lua#L3"`, which Claude Code reads as one path. A buffer that is not a file on disk sends its text instead of a path. Claude Code's at-mention needs a path, so that text goes to a pane agent or to OpenCode.
+
+A diff, a terminal tail, or any other text longer than about 1500 characters is written to a file under the cache directory, and the pane receives that path.
+
+`:TetherSendMany` (or `<leader>am`) opens a list of the same panes. Space marks a row, and Enter sends to every marked row.
+
+`:TetherAgents` opens the same agents in a scratch buffer: agent, state, pane, directory, and the last line of the title. Herdr reports the state. A tmux pane shows `?`. Enter focuses the pane, and `s` sends the file from the window you opened the list from. `require("tether").statusline()` returns a short string such as `claude:working codex:idle` for a statusline:
+
+```lua
+vim.o.statusline = "%{%v:lua.require('tether').statusline()%}"
+```
+
+The list and the statusline share one poll. Herdr is not asked again: the plugin reads the snapshot Herdr's own timer already fetched, and asks tmux only while the list is open or the statusline was drawn in the last few seconds. `User TetherAgent` fires when a pane's state changes. A move into `blocked` (or `waiting`, `needs_input`, `needs_permission`) notifies you.
 
 ### Reviewing edits
 
@@ -75,7 +105,8 @@ When Claude Code or Gemini CLI proposes an edit, a tab opens with the current fi
 - `ga` or `:TetherAccept` writes it. If the file has unsaved changes, it refuses rather than overwrite them. The text reported back to the agent is whatever is on disk after the write, including format-on-save.
 - `gh` or `:TetherAcceptHunk` writes only the change under the cursor and leaves the rest of the review open. The last hunk finishes the review.
 - `gr` or `:TetherReject` discards it. Closing the tab does the same. Hunks already written stay on disk.
-- `ga`, `gh`, and `gr` are buffer-local on the proposal. `:TetherStatus` lists a review that is still open, and `:TetherReviews` jumps to one.
+- `ga`, `gh`, and `gr` are buffer-local on the proposal. `gc` asks for a comment on the current line and leaves it as virtual text. `:TetherStatus` lists a review that is still open, and `:TetherReviews` jumps to one.
+- Rejecting a proposal that has comments types `I rejected the change to <file>: <comments>` into the pane of the agent that made it (the last pane of that agent, or a picker if there is none). Claude's reply stays `DIFF_REJECTED`. Gemini's `ide/diffRejected` notification still carries only the path.
 - A second proposal for a file that already has a review waits, and opens when the current one finishes.
 - Answering in Claude's terminal closes the tab for you.
 
@@ -85,7 +116,15 @@ When Claude Code or Gemini CLI proposes an edit, a tab opens with the current fi
 - `:TetherLog` shows recent handshakes, tool calls, and review events.
 - `:TetherFocus` jumps to the last Herdr or tmux agent pane. Set `focus = true` to do that after every send.
 - The last pane agent is remembered across Neovim restarts.
-- `User TetherClient` fires with `{ adapter, clients }` when a harness connects or drops. `User TetherReview` fires with `{ action, path }` when a review opens, a hunk is accepted, or the review is accepted or rejected.
+- `User TetherClient` fires with `{ adapter, clients }` when a harness connects or drops. `User TetherReview` fires with `{ action, path }` when a review opens, a hunk is accepted, or the review is accepted or rejected. `User TetherAgent` fires with `{ source, agent, pane_id, status, previous }` when a pane's state changes.
+
+### Agent edits
+
+`:TetherSetupHooks` prints a diff of `~/.claude/settings.json` and installs Claude Code hooks for Edit, Write, and MultiEdit, plus a Stop hook. The hook calls back into this Neovim through `TETHER_NVIM_SERVER`, which is set for terminals the plugin starts. `:TetherRemoveHooks` takes those entries out. Edits show as signs against the last committed text. `:TetherRevertHunk` restores the hunk under the cursor. `:TetherUndoTurn` restores the files that turn touched from a copy under Neovim's state directory, without using the git index.
+
+`:TetherWatch` watches the working tree for writes Neovim did not make. `watch = true` starts that watch with the plugin. `follow_edits = true` opens each file the agent touches.
+
+`:TetherSpawn claude` adds a git worktree and starts the agent in a new Herdr or tmux pane there. When that agent goes idle after working, the branch diff opens for review. `:TetherWorktreeClean` removes one of those worktrees once it has no uncommitted changes. Closing the pane leaves the worktree where it is.
 - `:TetherEnv` prints export lines for a terminal opened before the plugin started.
 - `:TetherStart` and `:TetherStop` start and stop everything.
 - `:checkhealth tether`
@@ -102,16 +141,28 @@ require("tether").setup({
   pick = "always",
   -- When true, a send also focuses that pane.
   focus = false,
+  -- When true, open each file an agent edits.
+  follow_edits = false,
+  -- When true, watch the working tree for writes Neovim did not make.
+  watch = false,
+  -- When true, a send writes an edited buffer first, so line numbers match the file the agent reads.
+  save_on_send = false,
   -- Set one to false to skip it, or keymaps = false for none.
   keymaps = {
     send_file = "<leader>af",
     send_selection = "<leader>ao",
     send_diagnostic = "<leader>ad",
     send_node = "<leader>an",
+    send_prompt = "<leader>ap",
+    send_many = "<leader>am",
+    send_quickfix = "<leader>aq",
+    send_diff = "<leader>ag",
+    send_terminal = "<leader>at",
+    send_references = "<leader>ar",
     focus = "<leader>aj",
   },
   -- Buffer-local maps on the proposal. Set one to false to skip it, or false for none.
-  review_keymaps = { accept = "ga", reject = "gr", hunk = "gh" },
+  review_keymaps = { accept = "ga", reject = "gr", hunk = "gh", comment = "gc" },
   -- Gemini CLI decides workspace trust itself. Set true or false to override it.
   gemini = { trusted = nil },
   -- Extra tmux process names to treat as agents. A list, or { basename = "label" }.

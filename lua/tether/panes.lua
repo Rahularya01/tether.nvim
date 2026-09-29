@@ -56,6 +56,7 @@ end
 -- One line per agent for the picker.
 function M.describe(agent, here)
   local title = agent.terminal_title_stripped or agent.terminal_title or ""
+  title = title:gsub("%s*\n%s*", " ")
   local where = agent.label or agent.pane_id
   if here and agent.tab_id == here.tab then
     where = where .. ", this tab"

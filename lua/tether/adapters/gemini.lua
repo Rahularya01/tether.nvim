@@ -76,6 +76,13 @@ function M.start(opts)
   local ready = false
   local handle = { token = token, dir = dir }
 
+  -- init.lua sets handle.on_change to hear about clients connecting and dropping.
+  local function changed()
+    if handle.on_change then
+      vim.schedule(handle.on_change)
+    end
+  end
+
   local function send_note(method, params)
     local body = vim.json.encode({
       jsonrpc = "2.0",
@@ -87,6 +94,7 @@ function M.start(opts)
       local ok = pcall(stream.write, body)
       if not ok then
         table.remove(streams, i)
+        changed()
       end
     end
   end
@@ -110,7 +118,7 @@ function M.start(opts)
         reply({
           protocolVersion = params.protocolVersion or "2025-06-18",
           capabilities = { tools = vim.empty_dict() },
-          serverInfo = { name = "tether.nvim", version = "0.3.0" },
+          serverInfo = mcp.server_info,
         })
       end,
       ["tools/list"] = function(_, reply)
@@ -129,10 +137,11 @@ function M.start(opts)
             if accepted then
               send_note("ide/diffAccepted", { filePath = path, content = content })
             else
+              -- The IDE notification carries the path only. Comments go out as a prompt line.
               send_note("ide/diffRejected", { filePath = path })
             end
             push()
-          end)
+          end, { adapter = "gemini" })
           if not opened then
             reply(mcp.text(tostring(err), true))
           else
@@ -197,9 +206,11 @@ function M.start(opts)
                 table.remove(streams, i)
               end
             end
+            changed()
           end,
         })
         streams[#streams + 1] = stream
+        changed()
         if ready then
           push(true)
         end
@@ -283,6 +294,9 @@ function M.start(opts)
   end
   handle.client_count = function()
     return #streams
+  end
+  handle.describe = function()
+    return string.format("127.0.0.1:%s  clients=%d", tostring(handle.port), #streams)
   end
   return handle
 end

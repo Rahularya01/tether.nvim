@@ -1,5 +1,8 @@
 local M = {}
 
+-- What tether.nvim tells an MCP client it is, in the initialize reply.
+M.server_info = { name = "tether.nvim", version = "0.4.0" }
+
 function M.ok(id, result)
   return { jsonrpc = "2.0", id = id, result = result }
 end

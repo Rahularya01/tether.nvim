@@ -89,8 +89,12 @@ function M.start(opts)
   local scanning = false
 
   local function set_detail(text, connected)
+    local was = handle.connected
     handle.detail = text
     handle.connected = connected and true or false
+    if was ~= handle.connected and handle.on_change then
+      vim.schedule(handle.on_change)
+    end
   end
 
   local function apply(info, secret)

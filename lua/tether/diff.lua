@@ -8,12 +8,19 @@ local sessions = {}
 -- path -> list of { content, on_done, opts }. Shown after the open review of that file finishes.
 local queued = {}
 
-local default_keymaps = { accept = "ga", reject = "gr", hunk = "gh" }
+local default_keymaps = { accept = "ga", reject = "gr", hunk = "gh", comment = "gc" }
 local keymaps = {
   accept = default_keymaps.accept,
   reject = default_keymaps.reject,
   hunk = default_keymaps.hunk,
+  comment = default_keymaps.comment,
 }
+local comment_ns = vim.api.nvim_create_namespace("tether-review-comments")
+
+-- Set by init.lua. Called with the session and a prompt line when a rejection
+-- has comments. Claude's openDiff reply stays a fixed string, so the comments
+-- travel through the prompt instead.
+M.on_feedback = nil
 
 function M.configure(opts)
   if opts == false then
@@ -25,6 +32,7 @@ function M.configure(opts)
       accept = default_keymaps.accept,
       reject = default_keymaps.reject,
       hunk = default_keymaps.hunk,
+      comment = default_keymaps.comment,
     }
     return
   end
@@ -108,16 +116,28 @@ local function promote(path)
   end)
 end
 
+local function comment_summary(session)
+  local parts = {}
+  for _, comment in ipairs(session.comments or {}) do
+    parts[#parts + 1] = string.format("L%d: %s", comment.line, comment.text)
+  end
+  return table.concat(parts, "; ")
+end
+
 local function finish(session, accepted, content)
   if session.done then
     return
   end
   session.done = true
   local path = session.path
+  local summary = (not accepted) and comment_summary(session) or ""
   forget(session)
   teardown(session)
   session.on_done(accepted, content or "")
   emit(accepted and "accept" or "reject", path)
+  if summary ~= "" and M.on_feedback then
+    pcall(M.on_feedback, session, string.format("I rejected the change to %s: %s", path, summary))
+  end
   promote(path)
 end
 
@@ -128,7 +148,11 @@ local function review_hint()
   local accept = (keymaps.accept and keymaps.accept ~= "") and keymaps.accept or ":TetherAccept"
   local hunk = (keymaps.hunk and keymaps.hunk ~= "") and keymaps.hunk or ":TetherAcceptHunk"
   local reject = (keymaps.reject and keymaps.reject ~= "") and keymaps.reject or ":TetherReject"
-  return accept .. " accept   " .. hunk .. " hunk   " .. reject .. " reject"
+  local hint = accept .. " accept   " .. hunk .. " hunk   " .. reject .. " reject"
+  if keymaps.comment and keymaps.comment ~= "" then
+    hint = hint .. "   " .. keymaps.comment .. " comment"
+  end
+  return hint
 end
 
 local function bind_review(session)
@@ -159,6 +183,14 @@ local function bind_review(session)
       vim.notify("tether: " .. (err or "no hunk to accept"), vim.log.levels.WARN)
     end
   end, "Tether: accept the hunk under the cursor")
+  if keymaps.comment and keymaps.comment ~= "" then
+    vim.keymap.set({ "n", "x" }, keymaps.comment, function()
+      local ok, err = M.comment(session.path)
+      if not ok then
+        vim.notify("tether: " .. (err or "no diff to comment on"), vim.log.levels.WARN)
+      end
+    end, { buffer = session.proposed, silent = true, desc = "Tether: comment on this proposal" })
+  end
 end
 
 -- opts.label names the review so a harness can close it later (Claude's tab_name).
@@ -212,6 +244,8 @@ function M.open(path, new_content, on_done, opts)
       proposed_win = proposed_win,
       eol = eol,
       on_done = on_done,
+      adapter = opts.adapter,
+      comments = {},
     }
     sessions[path] = session
     bind_review(session)
@@ -427,6 +461,40 @@ function M.accept_hunk(path)
   vim.api.nvim_echo({
     { "Accepted a hunk of " .. session.path .. "  " .. #left .. " still open", "ModeMsg" },
   }, false, {})
+  return true
+end
+
+function M.add_comment(path, line, text)
+  local session = find(path)
+  if not session then
+    return nil, "no diff to comment on"
+  end
+  if type(text) ~= "string" or vim.trim(text) == "" then
+    return nil, "empty comment"
+  end
+  line = tonumber(line) or 1
+  session.comments = session.comments or {}
+  session.comments[#session.comments + 1] = { line = line, text = text }
+  if vim.api.nvim_buf_is_valid(session.proposed) then
+    pcall(vim.api.nvim_buf_set_extmark, session.proposed, comment_ns, math.max(0, line - 1), 0, {
+      virt_text = { { " " .. text, "Comment" } },
+      virt_text_pos = "eol",
+    })
+  end
+  return true
+end
+
+function M.comment(path)
+  local session = find(path)
+  if not session then
+    return nil, "no diff to comment on"
+  end
+  local line = vim.api.nvim_win_get_cursor(0)[1]
+  vim.ui.input({ prompt = "Comment: " }, function(text)
+    if text then
+      M.add_comment(session.path, line, text)
+    end
+  end)
   return true
 end
 
